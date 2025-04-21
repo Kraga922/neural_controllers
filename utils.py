@@ -40,7 +40,7 @@ def preds_to_proba(preds, eps=1e-3, proba_beta=50):
         preds /= preds.sum(dim=1, keepdim=True) # normalize predictions to sum to 1
     return preds
     
-def split_indices(N, frac=0.2, max_val_count=256, random_split=True):
+def split_indices(N, frac=0.2, max_val_count=1024, random_split=True):
     n_train = N - min(int(frac*N), max_val_count)
     n_train = n_train + n_train%2 # ensure even train samples
     
@@ -54,7 +54,13 @@ def split_indices(N, frac=0.2, max_val_count=256, random_split=True):
         val_indices = range(n_train, N)
     return train_indices, val_indices
         
-        
+def split_train_states(inputs, train_indices, val_indices):
+    train_inputs, val_inputs = {}, {}
+    for layer_idx, layer_states in inputs.items():
+        train_inputs[layer_idx] = layer_states[train_indices]
+        val_inputs[layer_idx] = layer_states[val_indices]
+    return train_inputs, val_inputs
+
 def load_model(model):
     if model=='llama_3_8b_it':
         model_id = "meta-llama/Meta-Llama-3.1-8B-Instruct"

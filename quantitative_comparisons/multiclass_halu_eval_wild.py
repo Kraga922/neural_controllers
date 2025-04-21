@@ -134,6 +134,14 @@ def get_splits(n_train, n_val, n_total, n_seeds):
         
     return splits
 
+def split_states_on_idx(inputs, split):
+    train_inputs, val_inputs, test_inputs = {}, {}, {}
+    for layer_idx, layer_states in inputs.items():
+        train_inputs[layer_idx] = layer_states[split['train_indices']]
+        val_inputs[layer_idx] = layer_states[split['val_indices']]
+        test_inputs[layer_idx] = layer_states[split['test_indices']]
+    return train_inputs, val_inputs, test_inputs
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control_method', type=str, default='rfm')
@@ -157,7 +165,6 @@ def main():
     
     # Set unsupervised flag based on control method
     unsupervised = (control_method == 'pca')
-        
     use_logistic = (control_method == 'logistic')
     
     original_control_method = str(control_method)
@@ -196,6 +203,22 @@ def main():
     
     inputs, labels = get_multiclass_halu_eval_wild_data(controller)
 
+    # Precompute and cache hidden states
+    hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
+                                    f'halu_eval_wild_{model_name}_unsupervised_{unsupervised}.pth')
+    if os.path.exists(hidden_states_path):
+        with open(hidden_states_path, 'rb') as f:
+            hidden_states = pickle.load(f)
+    else:
+        from direction_utils import get_hidden_states
+        hidden_states = get_hidden_states(inputs, language_model, tokenizer, 
+                                      controller.hidden_layers, 
+                                      controller.hyperparams['forward_batch_size'])
+    
+        os.makedirs(os.path.dirname(hidden_states_path), exist_ok=True)
+        with open(hidden_states_path, 'wb') as f:
+            pickle.dump(hidden_states, f)
+
     splits = get_splits(n_train, n_val, len(labels), n_seeds)
     if args.seed is not None:
         seeds = [args.seed]
@@ -205,50 +228,22 @@ def main():
     for seed in tqdm(seeds):
         split = splits[seed]
         
-        train_inputs = [inputs[i] for i in split['train_indices']]
-        val_inputs = [inputs[i] for i in split['val_indices']]
-        test_inputs = [inputs[i] for i in split['test_indices']]
+        train_hidden_states, val_hidden_states, test_hidden_states = split_states_on_idx(hidden_states, split)
         
         train_labels = labels[split['train_indices']]
         val_labels = labels[split['val_indices']]
         test_labels = labels[split['test_indices']]
 
-        ntrain  = len(train_inputs)
-        nval = len(val_inputs)
-        ntest = len(test_inputs)
-        out_name = f'{NEURAL_CONTROLLERS_DIR}/results/halu_eval_wild_results/{control_method}_data_counts_seed_{seed}.pkl'
-        with open(out_name, 'wb') as f:
-            counts = {'train':ntrain, 'val':nval, 'test':ntest}
-            pickle.dump(counts, f)
-        
-        if unsupervised:
-            # Split train data into positive and negative examples
-            pos_train = [train_inputs[i] for i, label in enumerate(train_labels) if label == 1]
-            neg_train = [train_inputs[i] for i, label in enumerate(train_labels) if label == 0]
-            
-            # Create paired training data
-            train_inputs_processed, train_labels_processed = create_paired_data(pos_train, neg_train)
-            train_inputs_processed = np.concatenate(train_inputs_processed).tolist()
-            train_labels_processed = np.concatenate(train_labels_processed).tolist()
-        else:
-            train_inputs_processed = train_inputs
-            train_labels_processed = train_labels
-        
-        assert(len(train_inputs_processed) > 0)
-        assert(len(val_inputs) > 0)
-        assert(len(test_inputs) > 0)
-        
-        print("train shapes:", len(train_inputs_processed), train_labels_processed.shape)
         try:
             controller.load(concept=f'halu_eval_wild_multiclass_seed_{seed}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
-            controller.compute_directions(train_inputs_processed, train_labels_processed)
+            controller.compute_directions(train_hidden_states, train_labels, val_hidden_states, val_labels)
                 
             controller.save(concept=f'halu_eval_wild_multiclass_seed_{seed}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
 
         val_metrics, test_metrics, _ = controller.evaluate_directions(
-            val_inputs, val_labels,
-            test_inputs, test_labels,
+            val_hidden_states, val_labels,
+            test_hidden_states, test_labels,
             n_components=n_components,
             use_logistic=use_logistic,
             use_rfm=use_rfm,
@@ -264,9 +259,7 @@ def main():
         out_name = f'{results_dir}/multiclass_{model_name}_{original_control_method}_seed_{seed}_test_metrics.pkl'
         with open(out_name, 'wb') as f:
             pickle.dump(test_metrics, f)
-                     
-        gc.collect()
-        torch.cuda.empty_cache()
+
         
 if __name__ == '__main__':              
     main()

@@ -120,15 +120,15 @@ class NeuralController:
             val_labels = torch.tensor(val_labels).reshape(-1,1)
             
         self.directions, self.signs, self.detector_coefs, _ = self.toolkit._compute_directions(train_data, 
-                                                           train_labels, 
-                                                           self.model, 
-                                                           self.tokenizer, 
-                                                           self.hidden_layers, 
-                                                           self.hyperparams,
-                                                           val_data,
-                                                           val_labels,
-                                                           **kwargs
-                                                          )
+                                                                train_labels, 
+                                                                val_data,
+                                                                val_labels,
+                                                                self.model, 
+                                                                self.tokenizer, 
+                                                                self.hidden_layers, 
+                                                                self.hyperparams,
+                                                                **kwargs
+                                                            )
         
     def compute_directions_and_accs(self, 
                                     train_data, train_labels, 

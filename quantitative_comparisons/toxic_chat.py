@@ -1,5 +1,6 @@
 import argparse
 import sys
+import os
 from pathlib import Path
 
 # Add parent directory to path
@@ -8,16 +9,18 @@ sys.path.append(str(Path(__file__).parent.parent))
 from neural_controllers import NeuralController
 from utils import load_model
 import numpy as np
-
+from sklearn.metrics import roc_auc_score
 import pickle
+import torch
+from tqdm import tqdm
+import gc
 
 from datasets import load_dataset
 import random
 random.seed(0)
-from datasets import load_dataset
 
-import os   
 NEURAL_CONTROLLERS_DIR = os.environ['NEURAL_CONTROLLERS_DIR']
+
 def create_positive_negative_pairs(inputs, labels, max_pairs=None):
     """
     Creates pairs where each pair consists of one positive and one negative example.
@@ -85,11 +88,34 @@ def get_data(controller):
     return train_inputs, train_labels, test_inputs, test_labels
 
 
-def get_splits_fixed_train(n_val, n_total, n_seeds, unsupervised=False):
-    # Use same base name for both supervised and unsupervised to ensure same splits
+def split_states_on_idx(inputs, indices):
+    if isinstance(inputs, list):
+        return [inputs[i] for i in indices]
+    elif isinstance(inputs, dict):
+        split_states = {}
+        for layer_idx, layer_states in inputs.items():
+            split_states[layer_idx] = layer_states[indices]
+        return split_states
+    else:
+        return inputs[indices]
+
+
+def get_splits(k_folds, n_total, n_seeds):
+    """
+    Creates k-fold cross validation splits with multiple random seeds.
+    
+    Args:
+        k_folds (int): Number of folds for cross validation
+        n_total (int): Total number of samples
+        n_seeds (int): Number of different random seeds
+        
+    Returns:
+        List of dictionaries containing fold indices for each seed
+    """
     results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/toxic_chat_results'
     os.makedirs(results_dir, exist_ok=True)
-    out_name = f'{results_dir}/full_splits_fixed_train_nval_{n_val}_ntotal_{n_total}_nseeds_{n_seeds}.pkl'
+    out_name = f'{results_dir}/kfold_splits_k_{k_folds}_ntotal_{n_total}_nseeds_{n_seeds}.pkl'
+    
     try:
         with open(out_name, 'rb') as f:
             splits = pickle.load(f)
@@ -98,21 +124,33 @@ def get_splits_fixed_train(n_val, n_total, n_seeds, unsupervised=False):
         pass
 
     splits = []
-    indices = np.arange(n_total)
-
-    # Fix the train indices
-    np.random.seed(0)  # Fixed seed for reproducibility
-    indices = np.arange(n_total)
     
+    # For each seed
     for seed in range(n_seeds):
         np.random.seed(seed)
-        val_indices = np.random.choice(indices, size=n_val, replace=False)
-        train_indices = np.setdiff1d(indices, val_indices)
-
-        splits.append({
-            'val_indices': val_indices,
-            'train_indices': train_indices
-        })
+        
+        # Create random permutation of indices
+        indices = np.random.permutation(n_total)
+        
+        # Calculate fold size
+        fold_size = n_total // k_folds
+        
+        seed_splits = []
+        # Create k folds
+        for fold in range(k_folds):
+            start_idx = fold * fold_size
+            end_idx = start_idx + fold_size if fold < k_folds - 1 else n_total
+            
+            val_indices = indices[start_idx:end_idx]
+            train_indices = np.concatenate([indices[:start_idx], indices[end_idx:]])
+            
+            seed_splits.append({
+                'val_indices': val_indices,
+                'train_indices': train_indices,
+                'fold': fold
+            })
+            
+        splits.append(seed_splits)
 
     with open(out_name, 'wb') as f:
         pickle.dump(splits, f)
@@ -127,6 +165,8 @@ def main():
     parser.add_argument('--n_seeds', type=int, default=5)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--n_components', type=int, default=1)
+    parser.add_argument('--k_folds', type=int, default=5)
+    parser.add_argument('--rfm_iters', type=int, default=8)
     args = parser.parse_args()
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")
@@ -135,6 +175,7 @@ def main():
     model_name = args.model_name
     n_seeds = args.n_seeds
     n_components = args.n_components
+    k_folds = args.k_folds
     
     if control_method not in ['rfm']:
         n_components=1
@@ -164,68 +205,135 @@ def main():
         language_model,
         tokenizer,
         control_method=control_method,
-        rfm_iters=8,
+        rfm_iters=args.rfm_iters,
         batch_size=1
     )  
     controller.name = model_name
+    
     # Get base data first
     train_inputs, train_labels, test_inputs, test_labels = get_data(controller) 
     
-    # Split training data into train and validation sets (60/40 split)
-    n_val = int(len(train_labels) * 0.4) 
-    splits = get_splits_fixed_train(n_val, len(train_labels), n_seeds)
+    # Precompute and cache hidden states
+    train_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
+                                   f'toxic_chat_train_{model_name}_unsupervised_{unsupervised}.pth')
+    test_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
+                                  f'toxic_chat_test_{model_name}_unsupervised_{unsupervised}.pth')
+    
+    if os.path.exists(train_hidden_states_path) and os.path.exists(test_hidden_states_path):
+        print("Loading cached hidden states...")
+        with open(train_hidden_states_path, 'rb') as f:
+            train_hidden_states = pickle.load(f)
+        with open(test_hidden_states_path, 'rb') as f:
+            test_hidden_states = pickle.load(f)
+    else:
+        print("Computing hidden states...")
+        from direction_utils import get_hidden_states
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(train_hidden_states_path), exist_ok=True)
+        
+        # Compute train hidden states
+        train_hidden_states = get_hidden_states(train_inputs, language_model, tokenizer, 
+                                         controller.hidden_layers, 
+                                         controller.hyperparams['forward_batch_size'])
+        with open(train_hidden_states_path, 'wb') as f:
+            pickle.dump(train_hidden_states, f)
+            
+        # Compute test hidden states
+        test_hidden_states = get_hidden_states(test_inputs, language_model, tokenizer, 
+                                        controller.hidden_layers, 
+                                        controller.hyperparams['forward_batch_size'])
+        with open(test_hidden_states_path, 'wb') as f:
+            pickle.dump(test_hidden_states, f)
+    
+    # Convert train_labels to tensor for proper indexing
+    train_labels = torch.tensor(train_labels).cuda().float()
+    test_labels = torch.tensor(test_labels).cuda().float()
+    
+    # Get k-fold splits
+    splits = get_splits(k_folds, len(train_labels), n_seeds)
     
     seed = args.seed
-    split = splits[seed]
-        
-    # Get the base split indices first
-    val_indices = split['val_indices']
-    train_indices = split['train_indices']
-        
-    # Split the supervised data
-    val_inputs = [train_inputs[i] for i in val_indices]
-    train_inputs_split_base = [train_inputs[i] for i in train_indices]
+    seed_splits = splits[seed]
     
-    val_labels = [train_labels[i] for i in val_indices]
-    train_labels_split_base = [train_labels[i] for i in train_indices]
-    
-    # If unsupervised, create pairs from the split data
-    if unsupervised:
-        train_pairs, train_pair_labels = create_positive_negative_pairs(train_inputs_split_base, train_labels_split_base)
-        
-        train_hidden_states_split = np.concatenate(train_pairs).tolist()
-        train_labels_split = np.concatenate(train_pair_labels).tolist()
-    else:
-        train_hidden_states_split = train_inputs_split_base
-        train_labels_split = train_labels_split_base
-
-    try:
-        controller.load(concept='toxic_chat_full_seed_'+str(seed), model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
-    except:
-        controller.compute_directions(train_hidden_states_split, train_labels_split)
-        controller.save(concept='toxic_chat_full_seed_'+str(seed), model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
-
-
     results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/toxic_chat_results'
     os.makedirs(results_dir, exist_ok=True)
     
-    val_metrics, test_metrics, _ = controller.evaluate_directions(
-        val_inputs, val_labels,
-        test_inputs, test_labels,
-        n_components=n_components,
-        use_logistic=use_logistic,
-        use_rfm=use_rfm,
-        unsupervised=unsupervised
-    )
+    # Store predictions from each fold
+    all_test_predictions = []
     
-    out_name = f'{results_dir}/{model_name}_{original_control_method}_seed_{seed}_val_metrics.pkl'
-    with open(out_name, 'wb') as f:
-        pickle.dump(val_metrics, f)
+    # For each fold
+    for fold_data in seed_splits:
+        val_indices = fold_data['val_indices']
+        train_indices = fold_data['train_indices']
+        fold = fold_data['fold']
         
-    out_name = f'{results_dir}/{model_name}_{original_control_method}_seed_{seed}_test_metrics.pkl'
-    with open(out_name, 'wb') as f:
-        pickle.dump(test_metrics, f)
-        
+        # Check if predictions for this fold already exist
+        fold_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_seed_{seed}_fold_{fold}_test_predictions.pkl'
+        if os.path.exists(fold_predictions_file):
+            print(f"Loading cached predictions for fold {fold}")
+            with open(fold_predictions_file, 'rb') as f:
+                test_predictions = pickle.load(f)
+            all_test_predictions.append(test_predictions)
+            continue
             
+        # Split the hidden states
+        val_hidden_states = split_states_on_idx(train_hidden_states, val_indices)
+        train_hidden_states_split = split_states_on_idx(train_hidden_states, train_indices)
+        
+        # Split the labels
+        val_labels = train_labels[val_indices]
+        train_labels_split = train_labels[train_indices]
+        
+        # If unsupervised, create pairs from the split data
+        if unsupervised:
+            # For unsupervised methods - implementation would need to change
+            # to handle dictionary of hidden states rather than just inputs
+            raise NotImplementedError("Unsupervised method not implemented for precomputed hidden states")
+            
+        try:
+            controller.load(concept=f'toxic_chat_full_seed_{seed}_fold_{fold}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+        except:
+            controller.compute_directions(train_hidden_states_split, train_labels_split)
+            controller.save(concept=f'toxic_chat_full_seed_{seed}_fold_{fold}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+
+        # Evaluate on validation and test sets
+        val_metrics, test_metrics, test_predictions = controller.evaluate_directions(
+            val_hidden_states, val_labels,
+            test_hidden_states, test_labels,
+            n_components=n_components,
+            use_logistic=use_logistic,
+            use_rfm=use_rfm,
+            unsupervised=unsupervised,
+            return_predictions=True
+        )
+        
+        # Save fold-specific metrics and predictions
+        out_name = f'{results_dir}/{model_name}_{original_control_method}_seed_{seed}_fold_{fold}_val_metrics.pkl'
+        with open(out_name, 'wb') as f:
+            pickle.dump(val_metrics, f)
+            
+        out_name = f'{results_dir}/{model_name}_{original_control_method}_seed_{seed}_fold_{fold}_test_metrics.pkl'
+        with open(out_name, 'wb') as f:
+            pickle.dump(test_metrics, f)
+            
+        # Save test predictions for this fold
+        with open(fold_predictions_file, 'wb') as f:
+            pickle.dump(test_predictions, f)
+            
+        # Store test predictions for this fold
+        all_test_predictions.append(test_predictions)
+    
+    avg_test_predictions = np.mean(all_test_predictions, axis=0)
+
+    avg_test_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_seed_{seed}_avg_test_predictions.pkl'
+    with open(avg_test_predictions_file, 'wb') as f:
+        pickle.dump(avg_test_predictions, f)
+    
+    # Compute and save AUC score
+    auc_score = roc_auc_score(np.array(test_labels), avg_test_predictions.cpu().numpy())
+    print(f"\nFinal AUC score across all folds: {auc_score:.4f}")
+    
+        
 if __name__ == '__main__':              
     main()

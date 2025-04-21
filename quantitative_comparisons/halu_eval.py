@@ -184,7 +184,7 @@ def get_halu_eval_data(tokenizer, hal_type):
             test_inputs.append(x)
             test_labels.append(0 if prompt['hallucination']=='no' else 1)
     
-    return train_inputs, train_labels, test_inputs, test_labels
+    return train_inputs, np.array(train_labels), test_inputs, np.array(test_labels)
 
 def get_splits(n_val, n_total, n_seeds, hal_type):
     """
@@ -337,12 +337,12 @@ def main():
         split = splits[seed]
         
         # Apply split to test data instead of train data
-        val_hidden_states, test_hidden_states = split_test_states_on_idx(test_hidden_states, split)
-        val_labels, test_labels = test_labels[split['val_indices']], test_labels[split['test_indices']]
+        val_hidden_states_on_seed, test_hidden_states_on_seed = split_test_states_on_idx(test_hidden_states, split)
+        val_labels_on_seed, test_labels_on_seed = test_labels[split['val_indices']], test_labels[split['test_indices']]
 
         val_metrics, test_metrics, _ = controller.evaluate_directions(
-            val_hidden_states, val_labels,
-            test_hidden_states, test_labels,
+            val_hidden_states_on_seed, val_labels_on_seed,
+            test_hidden_states_on_seed, test_labels_on_seed,
             n_components=n_components,
             use_logistic=use_logistic,
             use_rfm=use_rfm,

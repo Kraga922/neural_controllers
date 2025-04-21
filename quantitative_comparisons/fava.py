@@ -248,6 +248,13 @@ def main():
     language_model, tokenizer = load_model(model=model_name)
     inputs, labels = get_fava_annotated_data(tokenizer)
 
+    controller = NeuralController(
+        language_model,
+        tokenizer,
+        control_method=control_method,
+        batch_size=1,
+        rfm_iters=5
+    )
     hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
                                       f'fava_annotated_{model_name}_unsupervised_{unsupervised}_train.pth')
     if os.path.exists(hidden_states_path):
@@ -269,14 +276,6 @@ def main():
     for seed in tqdm(seed_list):
         split = splits[seed]
         
-        controller = NeuralController(
-            language_model,
-            tokenizer,
-            control_method=control_method,
-            batch_size=1,
-            rfm_iters=5
-        )
-        
         val_hidden_states, test_hidden_states = split_test_states_on_idx(hidden_states, split)
         
         val_labels = [labels[i] for i in split['val_indices']]
@@ -284,11 +283,20 @@ def main():
 
         results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/fava_annotated_results'
         os.makedirs(results_dir, exist_ok=True)
-
         
         try:
             controller.load(concept='fava_training', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
+            # Create new controller and compute directions
+            controller = NeuralController(
+                language_model,
+                tokenizer,
+                n_components=5,
+                control_method=control_method,
+                batch_size=2,
+                rfm_iters=5
+            )
+
             train_inputs, train_labels = get_fava_training_data(tokenizer, unsupervised=unsupervised)
 
             train_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
@@ -305,15 +313,6 @@ def main():
                 with open(train_hidden_states_path, 'wb') as f:
                     pickle.dump(train_hidden_states, f)
 
-            # Create new controller and compute directions
-            controller = NeuralController(
-                language_model,
-                tokenizer,
-                n_components=5,
-                control_method=control_method,
-                batch_size=2,
-                rfm_iters=5
-            )
             controller.compute_directions(train_hidden_states, train_labels)
             controller.save(concept='fava_training', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
               
