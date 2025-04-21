@@ -109,20 +109,24 @@ class NeuralController:
         generation_utils.clear_hooks(hooks)
         return out
 
-    def compute_directions(self, data, labels, hidden_layers=None, **kwargs):
+    def compute_directions(self, train_data, train_labels, val_data=None, val_labels=None, hidden_layers=None, **kwargs):
         if hidden_layers is None:
             hidden_layers = self.hidden_layers
         self.hidden_layers = hidden_layers
         
-        if not isinstance(labels, torch.Tensor):
-            labels = torch.tensor(labels).reshape(-1,1)
+        if not isinstance(train_labels, torch.Tensor):
+            train_labels = torch.tensor(train_labels).reshape(-1,1)
+        if val_data is not None and not isinstance(val_labels, torch.Tensor):
+            val_labels = torch.tensor(val_labels).reshape(-1,1)
             
-        self.directions, self.signs, self.detector_coefs, _ = self.toolkit._compute_directions(data, 
-                                                           labels, 
+        self.directions, self.signs, self.detector_coefs, _ = self.toolkit._compute_directions(train_data, 
+                                                           train_labels, 
                                                            self.model, 
                                                            self.tokenizer, 
                                                            self.hidden_layers, 
                                                            self.hyperparams,
+                                                           val_data,
+                                                           val_labels,
                                                            **kwargs
                                                           )
         
@@ -183,22 +187,28 @@ class NeuralController:
         val_y = val_labels.to(self.model.device).float()
         test_y = test_labels.to(self.model.device).float()
         assert(val_y.shape[1]==test_y.shape[1])
+
+        if not isinstance(val_data, dict):
+            val_hidden_states = direction_utils.get_hidden_states(val_data, 
+                                                                self.model, 
+                                                                self.tokenizer, 
+                                                                hidden_layers, 
+                                                                self.hyperparams['forward_batch_size'],
+                                                                all_positions=agg_positions
+                                                                )
+        else:
+            val_hidden_states = val_data
         
-        val_hidden_states = direction_utils.get_hidden_states(val_data, 
+        if not isinstance(test_data, dict):
+            test_hidden_states = direction_utils.get_hidden_states(test_data, 
                                                               self.model, 
                                                               self.tokenizer, 
                                                               hidden_layers, 
                                                               self.hyperparams['forward_batch_size'],
                                                               all_positions=agg_positions
                                                              )
-        
-        test_hidden_states = direction_utils.get_hidden_states(test_data, 
-                                                              self.model, 
-                                                              self.tokenizer, 
-                                                              hidden_layers, 
-                                                              self.hyperparams['forward_batch_size'],
-                                                              all_positions=agg_positions
-                                                             )
+        else:
+            test_hidden_states = test_data
         
         projections = {
                         'val' : [],

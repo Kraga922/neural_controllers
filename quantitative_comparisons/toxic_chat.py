@@ -170,10 +170,6 @@ def main():
     controller.name = model_name
     # Get base data first
     train_inputs, train_labels, test_inputs, test_labels = get_data(controller) 
-
-    print('train')
-    print("train inputs", len(train_inputs), "train labels", len(train_labels))
-    print("test inputs", len(test_inputs), "test labels", len(test_labels))
     
     # Split training data into train and validation sets (60/40 split)
     n_val = int(len(train_labels) * 0.4) 
@@ -197,30 +193,22 @@ def main():
     if unsupervised:
         train_pairs, train_pair_labels = create_positive_negative_pairs(train_inputs_split_base, train_labels_split_base)
         
-        train_inputs_split = np.concatenate(train_pairs).tolist()
+        train_hidden_states_split = np.concatenate(train_pairs).tolist()
         train_labels_split = np.concatenate(train_pair_labels).tolist()
     else:
-        train_inputs_split = train_inputs_split_base
+        train_hidden_states_split = train_inputs_split_base
         train_labels_split = train_labels_split_base
 
     try:
         controller.load(concept='toxic_chat_full_seed_'+str(seed), model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
     except:
-        controller.compute_directions(train_inputs_split, train_labels_split)
+        controller.compute_directions(train_hidden_states_split, train_labels_split)
         controller.save(concept='toxic_chat_full_seed_'+str(seed), model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
 
 
-    ntrain  = len(train_inputs_split)
-    nval = len(val_inputs)
-    ntest = len(test_inputs)
     results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/toxic_chat_results'
     os.makedirs(results_dir, exist_ok=True)
     
-    out_name = f'{results_dir}/{control_method}_data_counts_seed_{seed}.pkl'
-    with open(out_name, 'wb') as f:
-        counts = {'train':ntrain, 'val':nval, 'test':ntest}
-        pickle.dump(counts, f)
-        
     val_metrics, test_metrics, _ = controller.evaluate_directions(
         val_inputs, val_labels,
         test_inputs, test_labels,

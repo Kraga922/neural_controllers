@@ -191,6 +191,14 @@ def get_splits(n_train, n_val, n_total, n_seeds):
 
     return splits
 
+def split_test_states_on_idx(inputs, split):
+    val_inputs, test_inputs = {}, {}
+    for layer_idx, layer_states in inputs.items():
+        val_inputs[layer_idx] = layer_states[split['val_indices']]
+        test_inputs[layer_idx] = layer_states[split['test_indices']]
+    return val_inputs, test_inputs
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control_method', type=str, default='rfm')
@@ -240,6 +248,20 @@ def main():
     language_model, tokenizer = load_model(model=model_name)
     inputs, labels = get_fava_annotated_data(tokenizer)
 
+    hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
+                                      f'fava_annotated_{model_name}_unsupervised_{unsupervised}_train.pth')
+    if os.path.exists(hidden_states_path):
+        with open(hidden_states_path, 'rb') as f:
+            hidden_states = pickle.load(f)
+    else:
+        from direction_utils import get_hidden_states
+        hidden_states = get_hidden_states(inputs, language_model, tokenizer, 
+                                      controller.hidden_layers, 
+                                      controller.hyperparams['forward_batch_size'])
+    
+        with open(hidden_states_path, 'wb') as f:
+            pickle.dump(hidden_states, f)
+
 
     splits = get_splits(n_train, n_val, len(labels), n_seeds)
 
@@ -255,26 +277,33 @@ def main():
             rfm_iters=5
         )
         
-        val_inputs = [inputs[i] for i in split['val_indices']]
-        test_inputs = [inputs[i] for i in split['test_indices']]
+        val_hidden_states, test_hidden_states = split_test_states_on_idx(hidden_states, split)
         
         val_labels = [labels[i] for i in split['val_indices']]
         test_labels = [labels[i] for i in split['test_indices']]
 
-        nval = len(val_inputs)
-        ntest = len(test_inputs)
         results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/fava_annotated_results'
         os.makedirs(results_dir, exist_ok=True)
 
-        out_name = f'{results_dir}/{control_method}_data_counts_seed_{seed}.pkl'
-        with open(out_name, 'wb') as f:
-            counts = {'val':nval, 'test':ntest}
-            pickle.dump(counts, f)
         
         try:
             controller.load(concept='fava_training', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
             train_inputs, train_labels = get_fava_training_data(tokenizer, unsupervised=unsupervised)
+
+            train_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
+                                      f'fava_training_{model_name}_unsupervised_{unsupervised}_train.pth')
+            if os.path.exists(train_hidden_states_path):
+                with open(train_hidden_states_path, 'rb') as f:
+                    train_hidden_states = pickle.load(f)
+            else:
+                from direction_utils import get_hidden_states
+                train_hidden_states = get_hidden_states(train_inputs, language_model, tokenizer, 
+                                            controller.hidden_layers, 
+                                            controller.hyperparams['forward_batch_size'])
+    
+                with open(train_hidden_states_path, 'wb') as f:
+                    pickle.dump(train_hidden_states, f)
 
             # Create new controller and compute directions
             controller = NeuralController(
@@ -285,15 +314,13 @@ def main():
                 batch_size=2,
                 rfm_iters=5
             )
-            controller.compute_directions(train_inputs, train_labels)
+            controller.compute_directions(train_hidden_states, train_labels)
             controller.save(concept='fava_training', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
               
-        assert(len(val_inputs) > 0)
-        assert(len(test_inputs) > 0)
-        
+
         val_metrics, test_metrics, _ = controller.evaluate_directions(
-            val_inputs, val_labels,
-            test_inputs, test_labels,
+            val_hidden_states, val_labels,
+            test_hidden_states, test_labels,
             n_components=n_components,
             use_logistic=use_logistic,
             use_rfm=use_rfm,
@@ -308,8 +335,5 @@ def main():
         with open(out_name, 'wb') as f:
             pickle.dump(test_metrics, f)
             
-        del controller
-        gc.collect()
-
 if __name__ == '__main__':              
     main()

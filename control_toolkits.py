@@ -12,27 +12,37 @@ class RFMToolkit():
     def __init__(self):
         pass
 
-    def _compute_directions(self, data, labels, model, tokenizer, hidden_layers, hyperparams,
+    def _compute_directions(self, train_data, train_labels, val_data, val_labels, model, tokenizer, hidden_layers, hyperparams,
                             test_data=None, test_labels=None, device='cuda', **kwargs):
         
         compare_to_linear = kwargs.get('compare_to_linear', False)
         log_spectrum = kwargs.get('log_spectrum', False)
         log_path = kwargs.get('log_path', None)
-                
-        train_indices, val_indices = split_indices(len(data))
+            
+
+        val_data_not_provided = val_data is None
+        if val_data_not_provided:
+            train_indices, val_indices = split_indices(len(train_data))
+            all_y = train_labels.float().to(device)
+            train_y = all_y[train_indices]
+            val_y = all_y[val_indices]
+        else:
+            train_y = train_labels.float().to(device)
+            val_y = val_labels.float().to(device)
+
         test_data_provided = test_data is not None 
-        
-        all_y = labels.float().to(device)
-        train_y = all_y[train_indices]
-        val_y = all_y[val_indices]
-        num_classes = all_y.shape[1]
+        num_classes = train_y.shape[1]
         
         direction_outputs = {
                                 'val' : [],
                                 'test' : []
                             }
         
-        hidden_states = direction_utils.get_hidden_states(data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
+        if not isinstance(train_data, dict):
+            hidden_states = direction_utils.get_hidden_states(train_data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
+        else:
+            hidden_states = train_data
+
         if test_data_provided:
             test_hidden_states = direction_utils.get_hidden_states(test_data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
             test_direction_accs = {}
@@ -45,9 +55,13 @@ class RFMToolkit():
         detector_coefs = {}
 
         for layer_to_eval in tqdm(hidden_layers):
-            hidden_states_at_layer = hidden_states[layer_to_eval].to(device).float()
-            train_X = hidden_states_at_layer[train_indices] 
-            val_X = hidden_states_at_layer[val_indices]
+            if val_data_not_provided:
+                hidden_states_at_layer = hidden_states[layer_to_eval]
+                train_X = hidden_states_at_layer[train_indices] 
+                val_X = hidden_states_at_layer[val_indices]
+            else:
+                train_X = train_data[layer_to_eval]
+                val_X = val_data[layer_to_eval]
                 
             print("train X shape:", train_X.shape, "train y shape:", train_y.shape, 
                   "val X shape:", val_X.shape, "val y shape:", val_y.shape)
@@ -151,23 +165,32 @@ class LinearProbeToolkit():
     def __init__(self):
         pass
 
-    def _compute_directions(self, data, labels, model, tokenizer, hidden_layers, hyperparams,
+    def _compute_directions(self, train_data, train_labels, val_data, val_labels, model, tokenizer, hidden_layers, hyperparams,
                             test_data=None, test_labels=None, device='cuda'):
                 
-        train_indices, val_indices = split_indices(len(data))
         test_data_provided = test_data is not None 
-        
-        all_y = labels.float().to(device)
-        train_y = all_y[train_indices]
-        val_y = all_y[val_indices]
-        num_classes = all_y.shape[1]
+        val_data_not_provided = val_data is None
+        if val_data_not_provided:
+            train_indices, val_indices = split_indices(len(train_data))
+            all_y = train_labels.float().to(device)
+            train_y = all_y[train_indices]
+            val_y = all_y[val_indices]
+        else:
+            train_y = train_labels.float().to(device)
+            val_y = val_labels.float().to(device)
+            
+        num_classes = train_y.shape[1]
         
         direction_outputs = {
                                 'val' : [],
                                 'test' : []
                             }
 
-        hidden_states = direction_utils.get_hidden_states(data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
+        if not isinstance(train_data, dict):
+            hidden_states = direction_utils.get_hidden_states(train_data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
+        else:
+            hidden_states = train_data
+
         if test_data_provided:
             test_hidden_states = direction_utils.get_hidden_states(test_data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
             test_direction_accs = {}
