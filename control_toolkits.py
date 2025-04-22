@@ -30,6 +30,16 @@ class Toolkit:
         val_passed_as_hidden_states = isinstance(val_data, dict)
         test_passed_as_hidden_states = isinstance(test_data, dict)
 
+        if not isinstance(train_labels, torch.Tensor):
+            train_labels = torch.tensor(train_labels).reshape(-1,1)
+        if val_data is not None and not isinstance(val_labels, torch.Tensor):
+            val_labels = torch.tensor(val_labels).reshape(-1,1)
+
+        if len(train_labels.shape) == 1:
+            train_labels = train_labels.unsqueeze(-1)
+        if val_labels is not None and len(val_labels.shape) == 1:
+            val_labels = val_labels.unsqueeze(-1)
+
         if val_data is None:
             # val data not provided, split train data into train and val
             if train_passed_as_hidden_states:

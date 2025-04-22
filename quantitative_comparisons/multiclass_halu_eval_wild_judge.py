@@ -5,16 +5,18 @@ from pathlib import Path
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
+
+NEURAL_CONTROLLERS_DIR = os.environ.get('NEURAL_CONTROLLERS_DIR', os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+RESULTS_DIR = f'{NEURAL_CONTROLLERS_DIR}/results'
+
 from utils import load_model
 
 import json
 import torch
 import pickle
 from tqdm import tqdm
-import gc
 import random
 from openai import OpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential
 from abc import ABC, abstractmethod
 
 import direction_utils  
@@ -43,7 +45,7 @@ TYPES = ['confused / erroneous queries', 'inappropriate content', 'complex reaso
          'out-of-scope information', 'beyond-modality interaction', 'other types']
 
 def get_multiclass_halu_eval_wild_data():
-    data_path = '../data/hallucinations/halu_eval_wild/HaluEval_Wild_6types.json'
+    data_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval_wild/HaluEval_Wild_6types.json'
     entries = read_json_to_list(data_path)
     
     # Get unique classes from TYPE_MAP
@@ -98,20 +100,19 @@ class HallucinationJudge(ABC):
                 print("Error:", judgement)
                 pred = 0  # Default to first class if parsing fails
                 
-            pred_ohe = torch.zeros(num_classes)
+            pred_ohe = torch.zeros(num_classes).cuda()
             pred_ohe[pred] = 1
             predictions.append(pred_ohe)
-            probabilities.append(torch.tensor(probs))
+            probabilities.append(torch.tensor(probs).cuda())
         
-        return torch.stack(predictions).cuda(), torch.stack(probabilities).cuda()
+        return torch.stack(predictions), torch.stack(probabilities)
     
     def evaluate_split(self, all_predictions, all_probabilities, all_labels, test_indices):
         """Evaluate metrics for a specific split using pre-computed predictions."""
-        split_predictions = all_predictions[test_indices]
         split_probabilities = all_probabilities[test_indices]
         split_labels = all_labels[test_indices]
         
-        metrics = direction_utils.compute_classification_metrics(split_predictions, split_labels)
+        metrics = direction_utils.compute_prediction_metrics(split_probabilities, split_labels)
         
         # Additional metrics based on probabilities could be added here
         # For example, cross entropy or other probability-based metrics
@@ -119,24 +120,20 @@ class HallucinationJudge(ABC):
         return metrics
 
 class OpenAIJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, model_name):
+    def __init__(self, judge_prompt, judge_model):
         super().__init__(judge_prompt)
-        self.model_name = model_name
+        self.judge_model = judge_model
         self.client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
     
-    @retry(
-        stop=stop_after_attempt(12),
-        wait=wait_exponential(min=1, max=1024), 
-    )
     def get_judgement(self, prompt):
         response = self.client.chat.completions.create(
-            model=self.model_name,
+            model=self.judge_model,
             messages=[
                 {"role": "system", "content": "You are a helpful assistant who follows instructions exactly."},
                 {"role": "user", "content": prompt}
             ],
             logprobs=True,
-            top_logprobs=50,
+            top_logprobs=20,
             max_tokens=5,
             temperature=0
         )
@@ -177,9 +174,9 @@ class OpenAIJudge(HallucinationJudge):
         return judgment, class_probs
 
 class GemmaJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, model_path=None):
+    def __init__(self, judge_prompt, judge_model):
         super().__init__(judge_prompt)
-        self.model, self.tokenizer = load_model('gemma_2_9b_it')
+        self.model, self.tokenizer = load_model(judge_model)
         
     def get_judgement(self, prompt):
         chat = [
@@ -187,107 +184,113 @@ class GemmaJudge(HallucinationJudge):
              'content':prompt
             }
         ]
-        assistant_tag = '<bos><start_of_turn>model\n\n'
-        wrapped_prompt = self.tokenizer.apply_chat_template(chat, tokenize=False)
-        wrapped_prompt += assistant_tag
+        wrapped_prompt = self.tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
         inputs = self.tokenizer(wrapped_prompt, return_tensors="pt", add_special_tokens=False).to(self.model.device)
         
         # Get token IDs for digits 1-6
         digit_ids = []
-        class_probs = [0.0] * len(TYPES)
         for i in range(1, 7):
             token_id = self.tokenizer.encode(str(i), add_special_tokens=False)[0]
             digit_ids.append(token_id)
         
         with torch.no_grad():
-            # Generate output for judgment
-            response = self.model.generate(
-                **inputs,
-                max_new_tokens=5,
-                do_sample=False
-            )
+            # Generate with return_dict_in_generate and output_scores to get logits
+            gen_kwargs = {
+                "max_new_tokens": 5,
+                "do_sample": False,
+                "return_dict_in_generate": True,
+                "output_scores": True,
+                "temperature": 0.0,
+            }
             
-            # Get logits for first token prediction
-            outputs = self.model(inputs.input_ids)
-            logits = outputs.logits[:, -1, :]
+            # Generate output for judgment
+            outputs = self.model.generate(**inputs, **gen_kwargs)
+            
+            # Extract the scores (logits) for the first generated token
+            token_scores = outputs.scores[0][0]
+            
+            # Apply softmax to get probabilities
+            token_probs = torch.nn.functional.softmax(token_scores, dim=-1)
             
             # Get probabilities for digits 1-6
-            probs = torch.nn.functional.softmax(logits, dim=-1)[0]
-            
+            class_probs = [0.0] * len(TYPES)
             for i, token_id in enumerate(digit_ids):
-                class_probs[i] = probs[token_id].item()
+                class_probs[i] = token_probs[token_id].item()
             
             # Normalize probabilities
             total_prob = sum(class_probs)
             if total_prob > 0:
                 class_probs = [p / total_prob for p in class_probs]
+            
+            # Find the most likely class based on probabilities
+            most_likely_class = str(class_probs.index(max(class_probs)) + 1)
         
-        # Decode response
-        text_response = self.tokenizer.decode(response[0])
-        text_response = text_response[text_response.find(assistant_tag)+len(assistant_tag):]
-        text_response = text_response.strip().strip('\n').replace('*','')
-        
-        return text_response, class_probs
+
+        return most_likely_class, class_probs
     
 class LlamaJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, model_path=None):
+    def __init__(self, judge_prompt, judge_model):
         super().__init__(judge_prompt)
-        self.model, self.tokenizer = load_model('llama_3_8b_it')
+        self.model, self.tokenizer = load_model(judge_model)
         
     def get_judgement(self, prompt):
         chat = [
             {"role": "system", "content": "You are a helpful assistant who follows instructions exactly."},
             {'role':'user', 'content': prompt }
         ]
-        wrapped_prompt = self.tokenizer.apply_chat_template(chat, tokenize=False)
+        wrapped_prompt = self.tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
         inputs = self.tokenizer(wrapped_prompt, return_tensors="pt", add_special_tokens=False).to(self.model.device)
         
         # Get token IDs for digits 1-6
         digit_ids = []
-        class_probs = [0.0] * len(TYPES)
         for i in range(1, 7):
             token_id = self.tokenizer.encode(str(i), add_special_tokens=False)[0]
             digit_ids.append(token_id)
         
         with torch.no_grad():
-            # Generate output for judgment
-            response = self.model.generate(
-                **inputs,
-                max_new_tokens=5,
-                do_sample=False
-            )
+            # Generate with return_dict_in_generate and output_scores to get logits
+            gen_kwargs = {
+                "max_new_tokens": 5,
+                "do_sample": False,
+                "return_dict_in_generate": True,
+                "output_scores": True,
+                "temperature": 0.0,
+            }
             
-            # Get logits for first token prediction
-            outputs = self.model(inputs.input_ids)
-            logits = outputs.logits[:, -1, :]
+            # Generate output for judgment
+            outputs = self.model.generate(**inputs, **gen_kwargs)
+            
+            # Extract the scores (logits) for the first generated token
+            token_scores = outputs.scores[0][0]
+            
+            # Apply softmax to get probabilities
+            token_probs = torch.nn.functional.softmax(token_scores, dim=-1)
             
             # Get probabilities for digits 1-6
-            probs = torch.nn.functional.softmax(logits, dim=-1)[0]
-            
+            class_probs = [0.0] * len(TYPES)
             for i, token_id in enumerate(digit_ids):
-                class_probs[i] = probs[token_id].item()
+                class_probs[i] = token_probs[token_id].item()
             
             # Normalize probabilities
             total_prob = sum(class_probs)
             if total_prob > 0:
                 class_probs = [p / total_prob for p in class_probs]
+            
+            # Find the most likely class based on probabilities
+            most_likely_class = str(class_probs.index(max(class_probs)) + 1)
         
-        # Decode response
-        text_response = self.tokenizer.decode(response[0])
-        assistant_tag = '<|start_header_id|>assistant<|end_header_id|>'
-        text_response = text_response[text_response.find(assistant_tag)+len(assistant_tag):]
-        
-        return text_response.strip(), class_probs
+        return most_likely_class, class_probs
 
 def save_predictions(predictions, probabilities, judge_type, judge_model):
     """Save all predictions to a file."""
-    out_name = f'./halu_eval_wild_results/multiclass_{judge_type}_{judge_model}_all_predictions.pkl'
+    os.makedirs(f'{RESULTS_DIR}/halu_eval_wild_results', exist_ok=True)
+    out_name = f'{RESULTS_DIR}/halu_eval_wild_results/multiclass_{judge_type}_{judge_model}_all_predictions.pkl'
     with open(out_name, 'wb') as f:
         pickle.dump({'predictions': predictions, 'probabilities': probabilities}, f)
 
 def load_predictions(judge_type, judge_model):
     """Load predictions from file if they exist."""
-    out_name = f'./halu_eval_wild_results/multiclass_{judge_type}_{judge_model}_all_predictions.pkl'
+    out_name = f'{RESULTS_DIR}/halu_eval_wild_results/multiclass_{judge_type}_{judge_model}_all_predictions.pkl'
     if os.path.exists(out_name):
         with open(out_name, 'rb') as f:
             data = pickle.load(f)
@@ -296,12 +299,11 @@ def load_predictions(judge_type, judge_model):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--n_seeds', type=int, default=20)
-    parser.add_argument('--n_train', type=int, default=200)
-    parser.add_argument('--n_val', type=int, default=350)
-    parser.add_argument('--n_components', type=int, default=2)
-    parser.add_argument('--judge_type', type=str, choices=['openai', 'llama', 'gemma'], default='llama')
-    parser.add_argument('--judge_model', type=str, default='gpt-4o')
+    parser.add_argument('--n_seeds', type=int, default=5)
+    parser.add_argument('--n_train', type=int, default=300)
+    parser.add_argument('--n_val', type=int, default=250)
+    parser.add_argument('--judge_type', type=str, default='llama', choices=['openai', 'llama', 'gemma'])
+    parser.add_argument('--judge_model', type=str, default='llama_3.3_70b_4bit_it', choices=['gpt-4o', 'llama_3.3_70b_4bit_it'])
     args = parser.parse_args()
     
     for n_, v_ in args.__dict__.items():
@@ -309,7 +311,9 @@ def main():
 
     inputs, labels, qtypes = get_multiclass_halu_eval_wild_data()
 
-    out_name = f'./halu_eval_wild_results/splits_ntrain_300_nval_250_ntotal_600_nseeds_20.pkl'
+    splits_dir = f'{RESULTS_DIR}/halu_eval_wild_results'
+    os.makedirs(splits_dir, exist_ok=True)
+    out_name = f'{splits_dir}/splits_ntrain_{args.n_train}_nval_{args.n_val}_ntotal_600_nseeds_{args.n_seeds}.pkl'
     with open(out_name, 'rb') as f:
         splits = pickle.load(f)
 
@@ -327,18 +331,10 @@ def main():
     if args.judge_type == 'openai':
         judge = OpenAIJudge(judge_prompt, args.judge_model)
     elif args.judge_type == 'llama':
-        judge = LlamaJudge(judge_prompt)
+        judge = LlamaJudge(judge_prompt, args.judge_model)
     elif args.judge_type == 'gemma':
-        judge = GemmaJudge(judge_prompt)
+        judge = GemmaJudge(judge_prompt, args.judge_model)
  
-    def get_counts(labels):
-        counts = {}
-        for label in labels:
-            class_idx = label.argmax().item()
-            counts[class_idx] = counts.get(class_idx, 0) + 1
-        return counts
- 
-    print('counts: ', get_counts(labels))
     
     # Try to load predictions or generate new ones
     all_predictions, all_probabilities = load_predictions(args.judge_type, args.judge_model)
@@ -346,9 +342,8 @@ def main():
         all_predictions, all_probabilities = judge.get_all_predictions(inputs)
         save_predictions(all_predictions, all_probabilities, args.judge_type, args.judge_model)
     
-    preds = all_predictions.argmax(dim=1)
-    targets = labels.argmax(dim=1)
-    print('Accuracy: ', (preds == targets).float().mean().item()*100)
+    # Collect metrics across all seeds
+    all_seed_metrics = []
     
     # Evaluate each seed using the pre-computed predictions
     for seed in tqdm(range(args.n_seeds)):
@@ -359,13 +354,20 @@ def main():
         for metric_name, value in metrics.items():
             print(f"{metric_name}: {value:.4f}")
 
-        out_name = f'./halu_eval_wild_results/multiclass_{args.judge_type}_{args.judge_model}_seed_{seed}_metrics.pkl'
+        out_dir = f'{RESULTS_DIR}/halu_eval_wild_results'
+        os.makedirs(out_dir, exist_ok=True)
+        out_name = f'{out_dir}/multiclass_{args.judge_type}_{args.judge_model}_seed_{seed}_metrics.pkl'
         with open(out_name, 'wb') as f:
             pickle.dump(metrics, f)
+            
+        all_seed_metrics.append(metrics)
         
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    # Calculate and print average metrics across all seeds
+    print("\nAverage metrics across all seeds:")
+    avg_metrics = {}
+    for metric_name in all_seed_metrics[0].keys():
+        avg_metrics[metric_name] = sum(seed_metric[metric_name] for seed_metric in all_seed_metrics) / len(all_seed_metrics)
+        print(f"{metric_name}: {avg_metrics[metric_name]:.4f}")
 
 if __name__ == '__main__':
     main()

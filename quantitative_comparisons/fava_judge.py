@@ -6,6 +6,9 @@ from pathlib import Path
 notebook_path = Path().absolute()
 sys.path.append(str(notebook_path.parent))
 
+NEURAL_CONTROLLERS_DIR = os.environ['NEURAL_CONTROLLERS_DIR']
+RESULTS_DIR = f'{NEURAL_CONTROLLERS_DIR}/results'
+
 from utils import load_model
 import re
 import json
@@ -61,7 +64,7 @@ def modify(s):
 
 def get_fava_annotated_data():
     # Specify the path to your JSON file
-    file_path = './annotations.json'
+    file_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/fava/annotations.json'
 
     # Open and read the JSON file
     with open(file_path, 'r') as file:
@@ -91,12 +94,12 @@ class HallucinationJudge(ABC):
         probabilities = []  # Store probabilities for AUC calculation
         for input_text in tqdm(inputs):
             prompt = self.judge_prompt.format(statement=input_text)
-            print("prompt:", prompt)
+            # print("prompt:", prompt)
             
-            judgement, probability = self.get_judgement(prompt)
-            predictions.append(int(judgement[0].lower()=='y'))
+            prediction, probability = self.get_judgement(prompt)
+            predictions.append(prediction)
             probabilities.append(probability)
-            print("judgement:", judgement, "probability:", probability)
+            print("prediction:", prediction, "probability:", probability)
         
         return torch.tensor(predictions), torch.tensor(probabilities)
     
@@ -105,7 +108,7 @@ class HallucinationJudge(ABC):
         split_predictions = all_predictions[test_indices]
         split_probabilities = all_probabilities[test_indices]
         split_labels = torch.tensor([all_labels[i] for i in test_indices])
-        metrics = direction_utils.compute_classification_metrics(split_predictions, split_labels)
+        metrics = direction_utils.compute_prediction_metrics(split_predictions, split_labels)
         
         # Calculate AUC
         from sklearn.metrics import roc_auc_score
@@ -116,24 +119,25 @@ class HallucinationJudge(ABC):
         return metrics
 
 class OpenAIJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, model_name):
+    def __init__(self, judge_prompt, judge_model):
         super().__init__(judge_prompt)
-        self.model_name = model_name
+        self.judge_model = judge_model
         self.client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
     
-    @retry(
-        stop=stop_after_attempt(12),
-        wait=wait_exponential(min=1, max=1024), 
-    )
+    # @retry(
+    #     stop=stop_after_attempt(12),
+    #     wait=wait_exponential(min=1, max=1024), 
+    # )
     def get_judgement(self, prompt):
+        print("Prompting OpenAI...")
         response = self.client.chat.completions.create(
-            model=self.model_name,
+            model=self.judge_model,
             messages=[
                 {"role": "system", "content": "You are a helpful assistant who follows instructions exactly."},
                 {"role": "user", "content": prompt}
             ],
             logprobs=True,
-            top_logprobs=50,
+            top_logprobs=20,
             max_tokens=1,
             temperature=0
         )
@@ -164,20 +168,20 @@ class OpenAIJudge(HallucinationJudge):
             # Normalize probabilities
             total = yes_prob_value + no_prob_value
             yes_prob_norm = yes_prob_value / total if total > 0 else 0.5
-            return ('yes' if yes_prob > no_prob else 'no', yes_prob_norm)
+            return (1 if yes_prob > no_prob else 0, yes_prob_norm)
         elif yes_prob is not None:
-            return ('yes', 1.0)
+            return (1, 1.0)
         elif no_prob is not None:
-            return ('no', 0.0)
+            return (0, 0.0)
         else:
             # Fallback to content
             is_yes = 'y' in response.choices[0].message.content.lower()
-            return ('yes' if is_yes else 'no', 1.0 if is_yes else 0.0)
+            return (is_yes, is_yes)
 
 class GemmaJudge(HallucinationJudge):
-    def __init__(self, judge_prompt):
+    def __init__(self, judge_prompt, judge_model):
         super().__init__(judge_prompt)
-        self.model, self.tokenizer = load_model('gemma_2_9b_it')
+        self.model, self.tokenizer = load_model(judge_model)
         
     def get_judgement(self, prompt):
         chat = [
@@ -199,7 +203,7 @@ class GemmaJudge(HallucinationJudge):
                 "do_sample": False,   # No sampling, we just want the probabilities
                 "return_dict_in_generate": True,
                 "output_scores": True,
-                "temperature": 1.0,   # No temperature scaling
+                "temperature": 0.0,   # No temperature scaling
             }
             
             # Generate a token and get the scores
@@ -220,12 +224,12 @@ class GemmaJudge(HallucinationJudge):
             yes_prob_norm = yes_prob / total_prob if total_prob > 0 else 0.5
             
             # Make the decision based on these probabilities
-            return ('yes' if yes_prob > no_prob else 'no', yes_prob_norm)
+            return (yes_prob > no_prob, yes_prob_norm)
     
 class LlamaJudge(HallucinationJudge):
-    def __init__(self, judge_prompt):
+    def __init__(self, judge_prompt, judge_model):
         super().__init__(judge_prompt)
-        self.model, self.tokenizer = load_model('llama_3_8b_it')
+        self.model, self.tokenizer = load_model(judge_model)
         
     def get_judgement(self, prompt):
         chat = [
@@ -248,7 +252,7 @@ class LlamaJudge(HallucinationJudge):
                 "do_sample": False,   # No sampling, we just want the probabilities
                 "return_dict_in_generate": True,
                 "output_scores": True,
-                "temperature": 1.0,   # No temperature scaling
+                "temperature": 0.0,   # No temperature scaling
             }
             
             # Generate a token and get the scores
@@ -269,17 +273,17 @@ class LlamaJudge(HallucinationJudge):
             yes_prob_norm = yes_prob / total_prob if total_prob > 0 else 0.5
             
             # Make the decision based on these probabilities
-            return ('yes' if yes_prob > no_prob else 'no', yes_prob_norm)
+            return (yes_prob > no_prob, yes_prob_norm)
 
 def save_predictions(predictions, probabilities, judge_type, judge_model):
     """Save all predictions to a file."""
-    out_name = f'./fava_annotated_results/{judge_type}_{judge_model}_all_predictions.pkl'
+    out_name = f'{RESULTS_DIR}/fava_annotated_results/{judge_type}_{judge_model}_all_predictions.pkl'
     with open(out_name, 'wb') as f:
         pickle.dump({'predictions': predictions, 'probabilities': probabilities}, f)
 
 def load_predictions(judge_type, judge_model):
     """Load predictions from file if they exist."""
-    out_name = f'./fava_annotated_results/{judge_type}_{judge_model}_all_predictions.pkl'
+    out_name = f'{RESULTS_DIR}/fava_annotated_results/{judge_type}_{judge_model}_all_predictions.pkl'
     if os.path.exists(out_name):
         with open(out_name, 'rb') as f:
             data = pickle.load(f)
@@ -289,11 +293,9 @@ def load_predictions(judge_type, judge_model):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control_method', type=str, default='rfm')
-    parser.add_argument('--model_name', type=str, default='llama_3_8b_it')
-    parser.add_argument('--n_components', type=int, default=3)
     parser.add_argument('--judge_type', type=str, choices=['openai', 'llama', 'gemma'], default='llama')
-    parser.add_argument('--judge_model', type=str, default='gpt-4o')
-    parser.add_argument('--n_seeds', type=int, default=20)
+    parser.add_argument('--judge_model', type=str, default='llama_3.3_70b_4bit_it', choices=['llama_3.3_70b_4bit_it', 'gpt-4o'])
+    parser.add_argument('--n_seeds', type=int, default=5)
     parser.add_argument('--n_train', type=int, default=0)
     parser.add_argument('--n_val', type=int, default=360)
     args = parser.parse_args()
@@ -302,7 +304,7 @@ def main():
         print(f"{n_:<20} : {v_}")
     
     inputs, labels = get_fava_annotated_data()
-    out_name = f'./fava_annotated_results/splits_ntrain_0_nval_360_ntotal_460_nseeds_20.pkl'
+    out_name = f'{RESULTS_DIR}/fava_annotated_results/splits_ntrain_{args.n_train}_nval_{args.n_val}_ntotal_460_nseeds_{args.n_seeds}.pkl'
     with open(out_name, 'rb') as f:
         splits = pickle.load(f)
     
@@ -339,9 +341,9 @@ def main():
     if args.judge_type == 'openai':
         judge = OpenAIJudge(judge_prompt, args.judge_model)
     elif args.judge_type == 'llama':
-        judge = LlamaJudge(judge_prompt)
+        judge = LlamaJudge(judge_prompt, args.judge_model)
     elif args.judge_type == 'gemma':
-        judge = GemmaJudge(judge_prompt)
+        judge = GemmaJudge(judge_prompt, args.judge_model)
 
     # Try to load predictions or generate new ones
     all_predictions, all_probabilities = load_predictions(args.judge_type, args.judge_model)
@@ -349,23 +351,27 @@ def main():
         all_predictions, all_probabilities = judge.get_all_predictions(inputs)
         save_predictions(all_predictions, all_probabilities, args.judge_type, args.judge_model)
     
+    # Collect metrics across all seeds
+    all_seed_metrics = []
+    
     # Iterate over seeds using pre-computed predictions
     for seed in tqdm(range(args.n_seeds)):
         split = splits[seed]
         
         metrics = judge.evaluate_split(all_predictions, all_probabilities, labels, split['test_indices'])
-        print(f"Seed {seed} metrics:")
-        for metric_name, value in metrics.items():
-            print(f"{metric_name}: {value:.4f}")
+        all_seed_metrics.append(metrics)
 
-        out_name = f'./fava_annotated_results/{args.judge_type}_{args.judge_model}_seed_{seed}_metrics.pkl'
+        out_name = f'{RESULTS_DIR}/fava_annotated_results/{args.judge_type}_{args.judge_model}_seed_{seed}_metrics.pkl'
         with open(out_name, 'wb') as f:
             pickle.dump(metrics, f)
+    
+    # Calculate and print average metrics across all seeds
+    print("\nAverage metrics across all seeds:")
+    avg_metrics = {}
+    for metric_name in all_seed_metrics[0].keys():
+        avg_metrics[metric_name] = sum(seed_metric[metric_name] for seed_metric in all_seed_metrics) / len(all_seed_metrics)
+        print(f"{metric_name}: {avg_metrics[metric_name]:.4f}")
         
-        # Clean up memory
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
 if __name__ == '__main__':
     main()

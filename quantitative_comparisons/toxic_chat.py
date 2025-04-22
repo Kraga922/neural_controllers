@@ -85,7 +85,7 @@ def get_data(controller):
     train_labels = [x['toxicity'] for x in ds['train']]
     test_labels = [x['toxicity'] for x in ds['test']]
     
-    return train_inputs, train_labels, test_inputs, test_labels
+    return train_inputs, np.array(train_labels), test_inputs, np.array(test_labels)
 
 
 def split_states_on_idx(inputs, indices):
@@ -277,7 +277,7 @@ def main():
         try:
             controller.load(concept=f'toxic_chat_fold_{fold}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
-            controller.compute_directions(train_hidden_states_split, train_labels_split)
+            controller.compute_directions(train_hidden_states_split, train_labels_split, val_hidden_states, val_labels)
             controller.save(concept=f'toxic_chat_fold_{fold}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
 
         # Evaluate on validation and test sets
@@ -288,7 +288,6 @@ def main():
             use_logistic=use_logistic,
             use_rfm=use_rfm,
             unsupervised=unsupervised,
-            return_predictions=True
         )
         
         # Save fold-specific metrics and predictions
@@ -307,16 +306,45 @@ def main():
         # Store test predictions for this fold
         all_test_predictions.append(test_predictions)
     
-    avg_test_predictions = np.mean(all_test_predictions, axis=0)
+    avg_agg_test_predictions = np.mean([p['aggregation'].cpu().numpy() for p in all_test_predictions], axis=0)
+    avg_best_layer_test_predictions = np.mean([p['best_layer'].cpu().numpy() for p in all_test_predictions], axis=0)
 
-    avg_test_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_avg_test_predictions.pkl'
+    avg_test_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_bagged_aggregated_predictions.pkl'
     with open(avg_test_predictions_file, 'wb') as f:
-        pickle.dump(avg_test_predictions, f)
+        pickle.dump(avg_agg_test_predictions, f)
+
+    avg_best_layer_test_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_bagged_best_layer_predictions.pkl'
+    with open(avg_best_layer_test_predictions_file, 'wb') as f:
+        pickle.dump(avg_best_layer_test_predictions, f)
     
     # Compute and save AUC score
-    auc_score = roc_auc_score(np.array(test_labels), avg_test_predictions.cpu().numpy())
-    print(f"\nFinal AUC score across all folds: {auc_score:.4f}")
-    
-        
+    from direction_utils import compute_prediction_metrics
+    agg_metrics = compute_prediction_metrics(avg_agg_test_predictions, test_labels)
+    best_layer_metrics = compute_prediction_metrics(avg_best_layer_test_predictions, test_labels)
+
+    agg_metrics_file = f'{results_dir}/{model_name}_{original_control_method}_bagged_aggregated_metrics.pkl'
+    with open(agg_metrics_file, 'wb') as f:
+        pickle.dump(agg_metrics, f)
+
+    best_layer_metrics_file = f'{results_dir}/{model_name}_{original_control_method}_bagged_best_layer_metrics.pkl'
+    with open(best_layer_metrics_file, 'wb') as f:
+        pickle.dump(best_layer_metrics, f)
+
+    print("Final metrics of aggregated predictions bagged over folds:")
+    print(f"AUC score: {agg_metrics['auc']:.4f}")
+    print(f"F1 score: {agg_metrics['f1']:.4f}")
+    print(f"Precision: {agg_metrics['precision']:.4f}")
+    print(f"Recall: {agg_metrics['recall']:.4f}")
+    print(f"Accuracy: {agg_metrics['acc']:.4f}")
+    print(f"MSE: {agg_metrics['mse']:.4f}")
+
+    print("Final metrics of best layer predictions bagged over folds:")
+    print(f"AUC score: {best_layer_metrics['auc']:.4f}")
+    print(f"F1 score: {best_layer_metrics['f1']:.4f}")
+    print(f"Precision: {best_layer_metrics['precision']:.4f}")
+    print(f"Recall: {best_layer_metrics['recall']:.4f}")
+    print(f"Accuracy: {best_layer_metrics['acc']:.4f}")
+    print(f"MSE: {best_layer_metrics['mse']:.4f}")
+
 if __name__ == '__main__':              
     main()

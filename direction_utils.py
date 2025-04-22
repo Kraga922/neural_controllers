@@ -89,6 +89,8 @@ def f1_score(preds, labels):
     return 2 * (precision * recall) / (precision + recall + 1e-8)  # add small epsilon to prevent division by zero
 
 def compute_prediction_metrics(preds, labels):
+    if len(labels.shape) == 1:
+        labels = labels.reshape(-1, 1)
     num_classes = labels.shape[1]
     if isinstance(preds, torch.Tensor):
         preds = preds.cpu().numpy()
@@ -390,7 +392,7 @@ def aggregate_layers(layer_outputs, val_y, test_y, use_logistic=False, use_rfm=F
         model.fit(train_X, train_y, val_X, val_y)              
         agg_preds = model.predict(test_X)
         metrics = compute_prediction_metrics(agg_preds, test_y)
-        return metrics, None, None
+        return metrics, None, None, agg_preds
     elif use_logistic:
         print("Using logistic aggregation")
         agg_beta, agg_bias = logistic_solve(val_X, val_y) # (num_layers*n_components, num_classes)

@@ -113,12 +113,6 @@ class NeuralController:
         if hidden_layers is None:
             hidden_layers = self.hidden_layers
         self.hidden_layers = hidden_layers
-        
-        if not isinstance(train_labels, torch.Tensor):
-            train_labels = torch.tensor(train_labels).reshape(-1,1)
-        if val_data is not None and not isinstance(val_labels, torch.Tensor):
-            val_labels = torch.tensor(val_labels).reshape(-1,1)
-            
         self.directions, self.signs, self.detector_coefs, _ = self.toolkit._compute_directions(train_data, 
                                                                 train_labels, 
                                                                 val_data,
@@ -167,7 +161,8 @@ class NeuralController:
                             agg_positions=False,
                             use_logistic=False,
                             use_rfm=False,
-                            unsupervised=False
+                            unsupervised=False,
+                            selection_metric='auc'
                            ):
         
         if hidden_layers is None:
@@ -180,9 +175,9 @@ class NeuralController:
             test_labels = torch.tensor(test_labels).reshape(-1,1)
         
         if len(val_labels.shape) == 1:
-            val_labels = val_labels.reshape(-1,1)
+            val_labels = val_labels.unsqueeze(-1)
         if len(test_labels.shape) == 1:
-            test_labels = test_labels.reshape(-1,1)
+            test_labels = test_labels.unsqueeze(-1)
         
         val_y = val_labels.to(self.model.device).float()
         test_y = test_labels.to(self.model.device).float()
@@ -277,6 +272,11 @@ class NeuralController:
         test_metrics['aggregation'] = agg_metrics
         test_predictions['aggregation'] = agg_predictions
         detector_coefs['aggregation'] = [agg_beta, agg_bias]
+
+        best_layer_on_val = max(val_metrics, key=lambda x: val_metrics[x][selection_metric])
+        test_predictions['best_layer'] = test_predictions[best_layer_on_val]
+        test_metrics['best_layer'] = test_metrics[best_layer_on_val]
+        
         return val_metrics, test_metrics, detector_coefs, test_predictions
     
     
