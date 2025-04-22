@@ -231,7 +231,7 @@ def split_test_states_on_idx(inputs, split):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--control_method', type=str, default='rfm')
+    parser.add_argument('--control_method', type=str, default='linear')
     parser.add_argument('--model_name', type=str, default='llama_3.3_70b_4bit_it')
     parser.add_argument('--n_components', type=int, default=2)
     parser.add_argument('--hal_type', type=str, default='qa')
@@ -295,6 +295,7 @@ def main():
         train_labels = np.concatenate(train_pair_labels).tolist()
             
 
+    print("Getting train hidden states")
     train_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
                                       f'halu_eval_{hal_type}_{model_name}_unsupervised_{unsupervised}_train.pth')
     if os.path.exists(train_hidden_states_path):
@@ -308,7 +309,8 @@ def main():
     
         with open(train_hidden_states_path, 'wb') as f:
             pickle.dump(train_hidden_states, f)
-            
+
+    print("Getting test hidden states")
     test_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
                                       f'halu_eval_{hal_type}_{model_name}_unsupervised_{unsupervised}_test.pth')
     if os.path.exists(test_hidden_states_path):
@@ -325,8 +327,10 @@ def main():
 
  
     try:
+        print("Loading directions")
         controller.load(concept='halu_eval_detect', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
     except:
+        print("Computing directions")
         controller.compute_directions(train_hidden_states, train_labels)
         controller.save(concept='halu_eval_detect', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
 

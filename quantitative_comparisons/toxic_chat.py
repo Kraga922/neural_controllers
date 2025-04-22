@@ -100,57 +100,46 @@ def split_states_on_idx(inputs, indices):
         return inputs[indices]
 
 
-def get_splits(k_folds, n_total, n_seeds):
+def get_splits(k_folds, n_total):
     """
     Creates k-fold cross validation splits with multiple random seeds.
     
     Args:
         k_folds (int): Number of folds for cross validation
         n_total (int): Total number of samples
-        n_seeds (int): Number of different random seeds
         
     Returns:
         List of dictionaries containing fold indices for each seed
     """
     results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/toxic_chat_results'
     os.makedirs(results_dir, exist_ok=True)
-    out_name = f'{results_dir}/kfold_splits_k_{k_folds}_ntotal_{n_total}_nseeds_{n_seeds}.pkl'
+    out_name = f'{results_dir}/kfold_splits_k_{k_folds}_ntotal_{n_total}.pkl'
     
     try:
         with open(out_name, 'rb') as f:
             splits = pickle.load(f)
             return splits
     except:
-        pass
-
-    splits = []
-    
-    # For each seed
-    for seed in range(n_seeds):
-        np.random.seed(seed)
-        
         # Create random permutation of indices
         indices = np.random.permutation(n_total)
-        
-        # Calculate fold size
+
+        splits = []
         fold_size = n_total // k_folds
-        
-        seed_splits = []
-        # Create k folds
+
+        # For each fold
         for fold in range(k_folds):
+            # Calculate fold size
             start_idx = fold * fold_size
             end_idx = start_idx + fold_size if fold < k_folds - 1 else n_total
             
             val_indices = indices[start_idx:end_idx]
             train_indices = np.concatenate([indices[:start_idx], indices[end_idx:]])
             
-            seed_splits.append({
+            splits.append({
                 'val_indices': val_indices,
                 'train_indices': train_indices,
                 'fold': fold
             })
-            
-        splits.append(seed_splits)
 
     with open(out_name, 'wb') as f:
         pickle.dump(splits, f)
@@ -162,10 +151,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control_method', type=str, default='rfm')
     parser.add_argument('--model_name', type=str, default='llama_3.3_70b_4bit_it')
-    parser.add_argument('--n_seeds', type=int, default=5)
-    parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--n_components', type=int, default=1)
-    parser.add_argument('--k_folds', type=int, default=5)
+    parser.add_argument('--k_folds', type=int, default=10)
     parser.add_argument('--rfm_iters', type=int, default=8)
     args = parser.parse_args()
     for n_, v_ in args.__dict__.items():
@@ -173,7 +160,6 @@ def main():
     
     control_method = args.control_method
     model_name = args.model_name
-    n_seeds = args.n_seeds
     n_components = args.n_components
     k_folds = args.k_folds
     
@@ -251,10 +237,7 @@ def main():
     test_labels = torch.tensor(test_labels).cuda().float()
     
     # Get k-fold splits
-    splits = get_splits(k_folds, len(train_labels), n_seeds)
-    
-    seed = args.seed
-    seed_splits = splits[seed]
+    splits = get_splits(k_folds, len(train_labels))
     
     results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/toxic_chat_results'
     os.makedirs(results_dir, exist_ok=True)
@@ -263,13 +246,13 @@ def main():
     all_test_predictions = []
     
     # For each fold
-    for fold_data in seed_splits:
+    for fold_data in splits:
         val_indices = fold_data['val_indices']
         train_indices = fold_data['train_indices']
         fold = fold_data['fold']
         
         # Check if predictions for this fold already exist
-        fold_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_seed_{seed}_fold_{fold}_test_predictions.pkl'
+        fold_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_fold_{fold}_test_predictions.pkl'
         if os.path.exists(fold_predictions_file):
             print(f"Loading cached predictions for fold {fold}")
             with open(fold_predictions_file, 'rb') as f:
@@ -292,13 +275,13 @@ def main():
             raise NotImplementedError("Unsupervised method not implemented for precomputed hidden states")
             
         try:
-            controller.load(concept=f'toxic_chat_full_seed_{seed}_fold_{fold}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.load(concept=f'toxic_chat_fold_{fold}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
             controller.compute_directions(train_hidden_states_split, train_labels_split)
-            controller.save(concept=f'toxic_chat_full_seed_{seed}_fold_{fold}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.save(concept=f'toxic_chat_fold_{fold}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
 
         # Evaluate on validation and test sets
-        val_metrics, test_metrics, test_predictions = controller.evaluate_directions(
+        val_metrics, test_metrics, _, test_predictions = controller.evaluate_directions(
             val_hidden_states, val_labels,
             test_hidden_states, test_labels,
             n_components=n_components,
@@ -309,11 +292,11 @@ def main():
         )
         
         # Save fold-specific metrics and predictions
-        out_name = f'{results_dir}/{model_name}_{original_control_method}_seed_{seed}_fold_{fold}_val_metrics.pkl'
+        out_name = f'{results_dir}/{model_name}_{original_control_method}_fold_{fold}_val_metrics.pkl'
         with open(out_name, 'wb') as f:
             pickle.dump(val_metrics, f)
             
-        out_name = f'{results_dir}/{model_name}_{original_control_method}_seed_{seed}_fold_{fold}_test_metrics.pkl'
+        out_name = f'{results_dir}/{model_name}_{original_control_method}_fold_{fold}_test_metrics.pkl'
         with open(out_name, 'wb') as f:
             pickle.dump(test_metrics, f)
             
@@ -326,7 +309,7 @@ def main():
     
     avg_test_predictions = np.mean(all_test_predictions, axis=0)
 
-    avg_test_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_seed_{seed}_avg_test_predictions.pkl'
+    avg_test_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_avg_test_predictions.pkl'
     with open(avg_test_predictions_file, 'wb') as f:
         pickle.dump(avg_test_predictions, f)
     

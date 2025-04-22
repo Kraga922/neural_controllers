@@ -402,7 +402,7 @@ def aggregate_layers(layer_outputs, val_y, test_y, use_logistic=False, use_rfm=F
     agg_preds = test_X@agg_beta + agg_bias
     agg_preds = agg_preds.reshape(test_y.shape)
     metrics = compute_prediction_metrics(agg_preds, test_y)
-    return metrics, agg_beta, agg_bias
+    return metrics, agg_beta, agg_bias, agg_preds
 
     
 def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y, 
@@ -491,7 +491,7 @@ def train_linear_probe_on_concept(train_X, train_y, val_X, val_y, use_bias=False
                 Xval = Xval.to(device)
 
                 XXt = X@X.T
-                alpha = torch.linalg.solve(XXt + reg*torch.eye(X.shape[0]).to(device), train_y)
+                alpha = torch.linalg.lstsq(XXt + reg*torch.eye(X.shape[0]).to(device), train_y).solution
                 beta = X.T@alpha
 
             preds = Xval.to(device) @ beta
@@ -502,6 +502,7 @@ def train_linear_probe_on_concept(train_X, train_y, val_X, val_y, use_bias=False
                 best_score = val_score
                 best_reg = reg
                 best_beta = deepcopy(beta)
+
         except Exception as e:
             import traceback
             print(f'Error fitting linear probe: {traceback.format_exc()}')

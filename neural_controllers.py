@@ -217,7 +217,7 @@ class NeuralController:
         val_metrics = {}
         test_metrics = {}
         detector_coefs = {}
-        
+        test_predictions = {}
         for layer_to_eval in tqdm(hidden_layers):
             direction = self.directions[layer_to_eval]
             if isinstance(direction, np.ndarray):
@@ -254,7 +254,8 @@ class NeuralController:
                 projected_test_preds = projected_test@beta + b
 
             assert(projected_test_preds.shape==test_y.shape)
-
+            test_predictions[layer_to_eval] = projected_test_preds
+            
             if self.hyperparams.get('calibrate', False):
                 print("Calibrating predictions")
                 calibrator = PlattCalibration()
@@ -272,11 +273,11 @@ class NeuralController:
             projections['val'].append(projected_val.reshape(-1, n_components))
             projections['test'].append(projected_test.reshape(-1, n_components))
         
-        agg_metrics, agg_beta, agg_bias = direction_utils.aggregate_layers(projections, val_y, test_y, use_logistic, use_rfm)
+        agg_metrics, agg_beta, agg_bias, agg_predictions = direction_utils.aggregate_layers(projections, val_y, test_y, use_logistic, use_rfm)
         test_metrics['aggregation'] = agg_metrics
-            
+        test_predictions['aggregation'] = agg_predictions
         detector_coefs['aggregation'] = [agg_beta, agg_bias]
-        return val_metrics, test_metrics, detector_coefs
+        return val_metrics, test_metrics, detector_coefs, test_predictions
     
     
     def detect(self, prompts, rep_layer=-15, use_rep_layer=False, use_avg_projection=False):

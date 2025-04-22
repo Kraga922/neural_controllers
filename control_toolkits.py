@@ -23,7 +23,6 @@ class Toolkit:
             train_y: Training labels
             val_y: Validation labels
             test_y: Test labels
-            val_data_not_provided: Boolean indicating if validation data was provided
             test_data_provided: Boolean indicating if test data was provided
             num_classes: Number of classes in the labels
         """
@@ -31,8 +30,8 @@ class Toolkit:
         val_passed_as_hidden_states = isinstance(val_data, dict)
         test_passed_as_hidden_states = isinstance(test_data, dict)
 
-        val_data_not_provided = val_data is None
-        if val_data_not_provided:
+        if val_data is None:
+            # val data not provided, split train data into train and val
             if train_passed_as_hidden_states:
                 assert -1 in train_data.keys(), "train_data must have a key -1 for the last layer"
                 train_indices, val_indices = split_indices(len(train_data[-1]))
@@ -77,8 +76,7 @@ class Toolkit:
             test_y = torch.tensor(test_labels).reshape(-1, num_classes).float().to(device)
         
         return (train_hidden_states, val_hidden_states, test_hidden_states, 
-                train_y, val_y, test_y, 
-                val_data_not_provided, test_data_provided, num_classes)
+                train_y, val_y, test_y, test_data_provided, num_classes)
     
     def get_layer_data(self, layer_to_eval, train_hidden_states, val_hidden_states, train_y, val_y, device='cuda'):
         """
@@ -120,8 +118,7 @@ class RFMToolkit(Toolkit):
         
         # Process data and extract hidden states
         (train_hidden_states, val_hidden_states, test_hidden_states, 
-         train_y, val_y, test_y, 
-         val_data_not_provided, test_data_provided, num_classes) = self.preprocess_data(
+         train_y, val_y, test_y, test_data_provided, num_classes) = self.preprocess_data(
             train_data, train_labels, val_data, val_labels, test_data, test_labels, 
             model, tokenizer, hidden_layers, hyperparams, device
         )
@@ -248,18 +245,13 @@ class LinearProbeToolkit(Toolkit):
         
         # Process data and extract hidden states
         (train_hidden_states, val_hidden_states, test_hidden_states, 
-         train_y, val_y, test_y, 
-         val_data_not_provided, test_data_provided, num_classes) = self.preprocess_data(
+         train_y, val_y, test_y, test_data_provided, num_classes) = self.preprocess_data(
             train_data, train_labels, val_data, val_labels, test_data, test_labels, 
             model, tokenizer, hidden_layers, hyperparams, device
         )
         
-        if val_data_not_provided:
-            train_indices, val_indices = split_indices(len(train_data))
-        else:
-            train_indices, val_indices = None, None
-            
         direction_outputs = {
+            'train': [],    
             'val': [],
             'test': []
         }
@@ -362,16 +354,10 @@ class LogisticRegressionToolkit(Toolkit):
                 
         # Process data and extract hidden states
         (train_hidden_states, val_hidden_states, test_hidden_states, 
-         train_y, val_y, test_y, 
-         val_data_not_provided, test_data_provided, num_classes) = self.preprocess_data(
+         train_y, val_y, test_y, test_data_provided, num_classes) = self.preprocess_data(
             train_data, train_labels, val_data, val_labels, test_data, test_labels, 
             model, tokenizer, hidden_layers, hyperparams, device
         )
-        
-        if val_data_not_provided:
-            train_indices, val_indices = split_indices(len(train_data))
-        else:
-            train_indices, val_indices = None, None
         
         direction_outputs = {
             'train': [],
@@ -478,16 +464,10 @@ class MeanDifferenceToolkit(Toolkit):
                 
         # Process data and extract hidden states
         (train_hidden_states, val_hidden_states, test_hidden_states, 
-         train_y, val_y, test_y, 
-         val_data_not_provided, test_data_provided, num_classes) = self.preprocess_data(
+         train_y, val_y, test_y, test_data_provided, num_classes) = self.preprocess_data(
             train_data, train_labels, val_data, val_labels, test_data, test_labels, 
             model, tokenizer, hidden_layers, hyperparams, device
         )
-        
-        if val_data_not_provided:
-            train_indices, val_indices = split_indices(len(train_data))
-        else:
-            train_indices, val_indices = None, None
         
         assert num_classes == 1, "Mean difference only works for binary classification"
         
@@ -562,16 +542,10 @@ class PCAToolkit(Toolkit):
                 
         # Process data and extract hidden states
         (train_hidden_states, val_hidden_states, test_hidden_states, 
-         train_y, val_y, test_y, 
-         val_data_not_provided, test_data_provided, num_classes) = self.preprocess_data(
+         train_y, val_y, test_y, test_data_provided, num_classes) = self.preprocess_data(
             train_data, train_labels, val_data, val_labels, test_data, test_labels, 
             model, tokenizer, hidden_layers, hyperparams, device
         )
-        
-        if val_data_not_provided:
-            train_indices, val_indices = split_indices(len(train_data))
-        else:
-            train_indices, val_indices = None, None
             
         assert num_classes == 1, "PCA only works for binary classification"
         
