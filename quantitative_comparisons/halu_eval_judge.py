@@ -109,22 +109,16 @@ class HallucinationJudge(ABC):
     
     def evaluate_split(self, all_predictions, all_probabilities, all_labels, test_indices):
         """Evaluate metrics for a specific split using pre-computed predictions."""
-        split_predictions = all_predictions[test_indices]
         split_probabilities = all_probabilities[test_indices]
         split_labels = torch.tensor([all_labels[i] for i in test_indices])
         
-        metrics = compute_prediction_metrics(split_predictions, split_labels)
+        split_probabilities = torch.tensor(split_probabilities).reshape(-1, 1)
+        split_labels = torch.tensor(split_labels).reshape(-1, 1)
+        metrics = compute_prediction_metrics(split_probabilities, split_labels)
         
         # Calculate AUC
         auc = roc_auc_score(split_labels.numpy(), split_probabilities.numpy())
         metrics['auc'] = auc
-        
-        trivial_acc = max(
-            (sum(split_labels)/len(split_labels)),
-            1-(sum(split_labels)/len(split_labels))
-        ) * 100
-        
-        metrics['trivial_acc'] = trivial_acc
         
         return metrics
         

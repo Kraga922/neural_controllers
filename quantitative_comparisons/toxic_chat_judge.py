@@ -240,7 +240,7 @@ class T5ToxicJudge(ToxicityJudge):
         self.model = AutoModelForSeq2SeqLM.from_pretrained("lmsys/toxicchat-t5-large-v1.0").to("cuda")
         self.tokenizer = AutoTokenizer.from_pretrained("t5-large")
         
-    def get_judgement(self, prompt):
+    def get_judgement(self, prompt, position=0):
         prefix = "ToxicChat: "
         inputs = self.tokenizer.encode(prefix + prompt, return_tensors="pt").to(self.model.device)
         
@@ -252,27 +252,49 @@ class T5ToxicJudge(ToxicityJudge):
                 output_scores=True
             )
             
-            # Calculate probabilities
-            token_scores = outputs.scores[0][0]
+            # Print generated tokens
+            generated_ids = outputs.sequences[0].tolist()
+            generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+            print("Generated text:", generated_text)
+            
+            # Print individual tokens
+            for i, token_id in enumerate(generated_ids):
+                token = self.tokenizer.decode([token_id])
+                print(f"Token {i}: {token} (ID: {token_id})")
+
+            # exit()
+            
+            # Calculate probabilities for the second token
+            token_scores = outputs.scores[position][0]  # Changed from [0][0] to [1][0] to get second token
             token_probs = torch.nn.functional.softmax(token_scores, dim=-1)
+
+            # print("outputs.scores", len(outputs.scores))
+            # print("outputs.scores[position]", len(outputs.scores[position]))
+            # print("outputs.scores[position][0]", outputs.scores[position][0].shape)
             
             # Get tokens for positive and negative
-            pos_tokens = [self.tokenizer.encode("po", add_special_tokens=False)[0]]
-            neg_tokens = [self.tokenizer.encode("ne", add_special_tokens=False)[0]]
-            
+            pos_tokens = [self.tokenizer.encode("positive", add_special_tokens=False)[0]]
+            neg_tokens = [self.tokenizer.encode("negative", add_special_tokens=False)[0]]
+
+            # print("pos_tokens:", pos_tokens)
+            # print("neg_tokens:", neg_tokens)
+
+            # print("token_probs:", token_probs.shape)
+            # print("token_scores:", token_scores.shape)
+
             # Sum probabilities for related tokens
             pos_prob = sum(token_probs[t].item() for t in pos_tokens)
             neg_prob = sum(token_probs[t].item() for t in neg_tokens)
             
+            print("pos_prob:", pos_prob)
+            print("neg_prob:", neg_prob)
+
+            # exit()
             # Normalize
             total = pos_prob + neg_prob
             pos_prob_norm = pos_prob / total if total > 0 else 0.5
             
-            # Get actual output
-            response = self.tokenizer.decode(outputs.sequences[0], skip_special_tokens=True).strip().lower()
-            is_toxic = response[:2] == "po"
-            
-            return (int(is_toxic), pos_prob_norm)
+            return (pos_prob > neg_prob, pos_prob_norm)
 
 def save_predictions(predictions, probabilities, judge_type, judge_model):
     """Save all predictions to a file."""
@@ -292,8 +314,8 @@ def load_predictions(judge_type, judge_model):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--judge_type', type=str, choices=['openai', 'llama', 't5-large-ft', 'gemma'], default='llama')
-    parser.add_argument('--judge_model', type=str, default='llama_3.3_70b_4bit_it', choices=['gpt-4o', 'llama_3.3_70b_4bit_it'])
+    parser.add_argument('--judge_type', type=str, choices=['openai', 'llama', 'toxicchat', 'gemma'], default='toxicchat')
+    parser.add_argument('--judge_model', type=str, default=None, choices=['gpt-4o', 'llama_3.3_70b_4bit_it'])
     args = parser.parse_args()
     
     for n_, v_ in args.__dict__.items():
@@ -309,12 +331,13 @@ def main():
         judge = LlamaJudge(judge_prompt, args.judge_model)
     elif args.judge_type == 'gemma':
         judge = GemmaJudge(judge_prompt, args.judge_model)
-    elif args.judge_type == 't5-large-ft': 
+    elif args.judge_type == 'toxicchat': 
         judge_prompt='{query}'
         judge = T5ToxicJudge(judge_prompt)
     
     # Try to load predictions or generate new ones
-    all_predictions, all_probabilities = load_predictions(args.judge_type, args.judge_model)
+    all_predictions, all_probabilities = None, None
+    # all_predictions, all_probabilities = load_predictions(args.judge_type, args.judge_model)
     if all_predictions is None:
         metrics, all_predictions, all_probabilities = judge.evaluate_inputs(inputs, labels)
         save_predictions(all_predictions, all_probabilities, args.judge_type, args.judge_model)
