@@ -162,7 +162,7 @@ class NeuralController:
                             use_logistic=False,
                             use_rfm=False,
                             unsupervised=False,
-                            selection_metric='auc'
+                            selection_metric='auc',
                            ):
         
         if hidden_layers is None:

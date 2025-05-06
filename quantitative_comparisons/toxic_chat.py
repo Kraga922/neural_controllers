@@ -9,11 +9,8 @@ sys.path.append(str(Path(__file__).parent.parent))
 from neural_controllers import NeuralController
 from utils import load_model
 import numpy as np
-from sklearn.metrics import roc_auc_score
 import pickle
 import torch
-from tqdm import tqdm
-import gc
 
 from datasets import load_dataset
 import random
@@ -253,12 +250,12 @@ def main():
         
         # Check if predictions for this fold already exist
         fold_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_fold_{fold}_test_predictions.pkl'
-        if os.path.exists(fold_predictions_file):
-            print(f"Loading cached predictions for fold {fold}")
-            with open(fold_predictions_file, 'rb') as f:
-                test_predictions = pickle.load(f)
-            all_test_predictions.append(test_predictions)
-            continue
+        # if os.path.exists(fold_predictions_file):
+        #     print(f"Loading cached predictions for fold {fold}")
+        #     with open(fold_predictions_file, 'rb') as f:
+        #         test_predictions = pickle.load(f)
+        #     all_test_predictions.append(test_predictions)
+        #     continue
             
         # Split the hidden states
         val_hidden_states = split_states_on_idx(train_hidden_states, val_indices)
@@ -267,13 +264,7 @@ def main():
         # Split the labels
         val_labels = train_labels[val_indices]
         train_labels_split = train_labels[train_indices]
-        
-        # If unsupervised, create pairs from the split data
-        if unsupervised:
-            # For unsupervised methods - implementation would need to change
-            # to handle dictionary of hidden states rather than just inputs
-            raise NotImplementedError("Unsupervised method not implemented for precomputed hidden states")
-            
+          
         try:
             controller.load(concept=f'toxic_chat_fold_{fold}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:

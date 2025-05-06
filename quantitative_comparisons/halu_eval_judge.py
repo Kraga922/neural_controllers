@@ -20,72 +20,58 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from abc import ABC, abstractmethod
 from utils import load_model
 from sklearn.metrics import roc_auc_score
+import json
 
 def read_hallucination_prompts_from_lines(lines):
-    import re
-    
     dicts = []
     for line in lines:
-        line = line[1:-1]
-        x = re.findall('".*?"', line)
-        
-        prompt = {}
-        prompt['knowledge'] = x[1].strip('"')
-        prompt['question'] = x[3].strip('"')
-        prompt['answer'] = x[5].strip('"')
-        prompt['hallucination'] = x[7].strip('"')
-        dicts.append(prompt)
+        x = json.loads(line)
+        dicts.append(x)
     return dicts
 
-def clean(prompts):
-    new_prompts = []
-    for p in prompts:
-        if p['question'] == 'question':
-            continue
-        new_prompts.append(p)
-    return new_prompts
+def get_judge_halu_eval_data(hal_type):
+    qa_template = "Is the ANSWER to the following QUESTION factual? Simply state yes or no.\n\n"
+    qa_template += 'QUESTION: {question}\n\nANSWER: {answer}'
 
-def get_halu_eval_data(hal_type):
+    general_template = "Is the RESPONSE to the following QUERY factual? Simply state yes or no.\n\n"
+    general_template += 'QUERY: {query}\n\nRESPONSE: {response}'
+
     if hal_type=='qa':
-        data_path = f"{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval/qa_data.txt"
-        template = 'Yes or no, is the answer to the following question factual?\n\nQ: {question}\n\nA: {answer}'
-
+        data_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval/qa_data.txt'
         with open(data_path, 'r') as f:
             lines = f.readlines()
             raw_prompts = read_hallucination_prompts_from_lines(lines)
-            n = len(raw_prompts)
-            # Only use evaluation data (second half)
-            raw_prompts = raw_prompts[int(n//2):]
 
-        prompts = clean(raw_prompts)
+        n = len(raw_prompts)
+        clean_eval_prompts = raw_prompts[int(n//2):]
+        
         inputs = []
         labels = []
-        for prompt in prompts:
-            x_pos = template.format(question=prompt['question'], answer=prompt['answer'])
-            x_neg = template.format(question=prompt['question'], answer=prompt['hallucination'])
-            inputs.append(x_pos)
-            inputs.append(x_neg)
+        for prompt in clean_eval_prompts:
+            x_true = qa_template.format(knowledge=prompt['knowledge'], question=prompt['question'], answer=prompt['right_answer'])
+            x_false = qa_template.format(knowledge=prompt['knowledge'], question=prompt['question'], answer=prompt['hallucinated_answer'])
+            inputs.append(x_true)
+            inputs.append(x_false)
             labels += [0,1]
             
     elif hal_type=='general':
-        data_path = f"{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval/general_data.txt"
-        template = 'Is the response to the following query factual? Simply state yes or no.\n\nQuery: {query}\n\nResponse: {response}'
-        
+      
+        # Get general data for evaluation
+        data_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval/general_data.txt'
+
         with open(data_path, 'r') as f:
             lines = f.readlines()
-            raw_prompts = read_hallucination_prompts_from_lines(lines)
-            prompts = clean(raw_prompts)
+            eval_prompts = read_hallucination_prompts_from_lines(lines)
             
         inputs = []
         labels = []
-        for prompt in prompts:
-            x = template.format(query=prompt['question'], response=prompt['answer'])
+        for prompt in eval_prompts:
+            x = general_template.format(query=prompt['user_query'], response=prompt['chatgpt_response'])
             inputs.append(x)
-            # Flip the label logic to match the other code
-            label = 0 if prompt['hallucination']=='no' else 1
-            labels.append(label)
-        
+            labels.append(int(prompt['hallucination'].lower().strip() == 'yes'))
+    
     return inputs, labels
+
 
 class HallucinationJudge(ABC):
     def __init__(self, judge_prompt):
@@ -337,11 +323,17 @@ def main():
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")
     
-    inputs, labels = get_halu_eval_data(args.hal_type)
+    inputs, labels = get_judge_halu_eval_data(args.hal_type)
+
+    print("="*100)
+    print(inputs[0])
+    print("="*100)
+    print(labels[0])
+    print("="*100)
     
     # Get the same splits as used in the original code
     if args.hal_type == 'qa':
-        out_name = f'{RESULTS_DIR}/halu_eval_results/qa_test_splits_nval_3997_ntotal_7994_nseeds_{args.n_seeds}.pkl'
+        out_name = f'{RESULTS_DIR}/halu_eval_results/qa_test_splits_nval_5000_ntotal_10000_nseeds_{args.n_seeds}.pkl'
     else:
         out_name = f'{RESULTS_DIR}/halu_eval_results/general_test_splits_nval_2253_ntotal_4507_nseeds_{args.n_seeds}.pkl'
     

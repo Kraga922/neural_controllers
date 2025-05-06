@@ -83,7 +83,7 @@ def modify(s):
 
 def get_fava_annotated_data(tokenizer):
     # Specify the path to your JSON file
-    file_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/annotations.json'
+    file_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/fava/annotations.json'
 
     # Open and read the JSON file
     with open(file_path, 'r') as file:
@@ -225,23 +225,11 @@ def main():
     
     use_logistic = (control_method == 'logistic')
     original_control_method = str(control_method)
-    if control_method == 'logistic_rfm':
-        control_method = 'logistic'
-        use_rfm = True
-    elif control_method == 'linear_rfm':
-        control_method = 'linear'
-        use_rfm = True
-    elif control_method == 'rfm_linear':
-        control_method = 'rfm'
-        use_rfm = False
-    elif control_method == 'rfm':
+    if control_method == 'rfm':
         use_rfm = True
     else:
         use_rfm = False
                         
-            
-    if control_method=='logistic_concat':
-        use_logistic=True
         
     print("Num components:", n_components)
                         
@@ -317,7 +305,7 @@ def main():
             controller.save(concept='fava_training', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
               
 
-        val_metrics, test_metrics, _ = controller.evaluate_directions(
+        val_metrics, test_metrics, _, _ = controller.evaluate_directions(
             val_hidden_states, val_labels,
             test_hidden_states, test_labels,
             n_components=n_components,

@@ -144,7 +144,7 @@ def split_states_on_idx(inputs, split):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--control_method', type=str, default='rfm')
+    parser.add_argument('--control_method', type=str, default='logistic')
     parser.add_argument('--model_name', type=str, default='llama_3.3_70b_4bit_it', choices=['llama_3_8b_it', 'llama_3.3_70b_4bit_it'])
     parser.add_argument('--n_seeds', type=int, default=5)
     parser.add_argument('--n_train', type=int, default=300)
@@ -238,10 +238,9 @@ def main():
             controller.load(concept=f'halu_eval_wild_multiclass_seed_{seed}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
             controller.compute_directions(train_hidden_states, train_labels, val_hidden_states, val_labels)
-                
             controller.save(concept=f'halu_eval_wild_multiclass_seed_{seed}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
 
-        val_metrics, test_metrics, _ = controller.evaluate_directions(
+        val_metrics, test_metrics, _, _ = controller.evaluate_directions(
             val_hidden_states, val_labels,
             test_hidden_states, test_labels,
             n_components=n_components,
