@@ -18,63 +18,26 @@ random.seed(0)
 
 NEURAL_CONTROLLERS_DIR = os.environ['NEURAL_CONTROLLERS_DIR']
 
-def create_positive_negative_pairs(inputs, labels, max_pairs=None):
-    """
-    Creates pairs where each pair consists of one positive and one negative example.
-    If one list is shorter, extends it by randomly sampling from itself.
+def get_prompt(prompt_version):
+    if prompt_version == 'v1':
+        return 'Toxic content mainly includes offensiveness, sexism, and hateful speech. Does the following query contain toxic content? State yes or no. \n{query}'
+    else:
+        raise ValueError(f"Invalid prompt version: {prompt_version}")
 
-    Args:
-        inputs (list of str): The input texts.
-        labels (list of int): Corresponding toxicity labels (1 for positive, 0 for negative).
-        max_pairs (int): Maximum number of pairs to create.
-
-    Returns:
-        Tuple of (pairs, pair_labels)
-    """
-    if max_pairs is None:
-        max_pairs = len(inputs)
-
-    # Separate inputs by label
-    positive_inputs = [inp for inp, lbl in zip(inputs, labels) if lbl == 1]
-    negative_inputs = [inp for inp, lbl in zip(inputs, labels) if lbl == 0]
-
-    # Debugging statements
-    print(f"Number of positive examples: {len(positive_inputs)}")
-    print(f"Number of negative examples: {len(negative_inputs)}")
-
-    # Determine which list is longer
-    max_length = max(len(positive_inputs), len(negative_inputs))
-    num_pairs = min(max_length, max_pairs)
-
-    # Extend shorter list if necessary
-    if len(positive_inputs) < max_length:
-        additional_needed = max_length - len(positive_inputs)
-        positive_inputs.extend(random.choices(positive_inputs, k=additional_needed))
-    elif len(negative_inputs) < max_length:
-        additional_needed = max_length - len(negative_inputs)
-        negative_inputs.extend(random.choices(negative_inputs, k=additional_needed))
-
-    # Take only up to max_pairs
-    paired_positive = positive_inputs[:num_pairs]
-    paired_negative = negative_inputs[:num_pairs]
-
-    # Create pairs as tuples (positive, negative)
-    pairs = list(zip(paired_positive, paired_negative))
-
-    # Create corresponding label pairs (1, 0)
-    pair_labels = [[1, 0] for _ in range(len(pairs))]
-
-    return pairs, pair_labels
-
-
-def get_data(controller):
+def get_data(controller, prompt_version):
     # Load the dataset
     ds = load_dataset("lmsys/toxic-chat", "toxicchat1123")
 
     train_inputs = [x['user_input'] for x in ds['train']]
     test_inputs = [x['user_input'] for x in ds['test']]
+
+    prompt = get_prompt(prompt_version)
+
+    # Wrap inputs with prompt
+    train_inputs = [prompt.format(query=x) for x in train_inputs]
+    test_inputs = [prompt.format(query=x) for x in test_inputs]
         
-    # Format prompts using the controller
+    # Format prompts with chat template
     train_inputs = [controller.format_prompt(x) for x in train_inputs]
     test_inputs = [controller.format_prompt(x) for x in test_inputs]
     
@@ -151,6 +114,7 @@ def main():
     parser.add_argument('--n_components', type=int, default=1)
     parser.add_argument('--k_folds', type=int, default=10)
     parser.add_argument('--rfm_iters', type=int, default=8)
+    parser.add_argument('--prompt_version', type=str, default='v1')
     args = parser.parse_args()
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")
@@ -159,30 +123,11 @@ def main():
     model_name = args.model_name
     n_components = args.n_components
     k_folds = args.k_folds
-    
+    prompt_version = args.prompt_version
+
     if control_method not in ['rfm']:
         n_components=1
-        
-    use_logistic=(control_method=='logistic')
-    unsupervised=(control_method in ['pca'])
-
-    original_control_method = str(control_method)
-    if control_method=='logistic_rfm':
-        control_method='logistic'
-        use_rfm=True
-    elif control_method=='linear_rfm':
-        control_method='linear'
-        use_rfm=True
-    elif control_method=='rfm_linear':
-        control_method='rfm'
-        use_rfm=False
-    elif control_method=='rfm':
-        use_rfm=True
-    else:
-        use_rfm=False
-    
-    print("Num components:", n_components)
-                        
+                            
     language_model, tokenizer = load_model(model=model_name)
     controller = NeuralController(
         language_model,
@@ -194,13 +139,13 @@ def main():
     controller.name = model_name
     
     # Get base data first
-    train_inputs, train_labels, test_inputs, test_labels = get_data(controller) 
+    train_inputs, train_labels, test_inputs, test_labels = get_data(controller, prompt_version) 
     
     # Precompute and cache hidden states
     train_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
-                                   f'toxic_chat_train_{model_name}_unsupervised_{unsupervised}.pth')
+                                   f'toxic_chat_train_{model_name}_prompt_{prompt_version}.pth')
     test_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
-                                  f'toxic_chat_test_{model_name}_unsupervised_{unsupervised}.pth')
+                                  f'toxic_chat_test_{model_name}_prompt_{prompt_version}.pth')
     
     if os.path.exists(train_hidden_states_path) and os.path.exists(test_hidden_states_path):
         print("Loading cached hidden states...")
@@ -249,13 +194,7 @@ def main():
         fold = fold_data['fold']
         
         # Check if predictions for this fold already exist
-        fold_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_fold_{fold}_test_predictions.pkl'
-        # if os.path.exists(fold_predictions_file):
-        #     print(f"Loading cached predictions for fold {fold}")
-        #     with open(fold_predictions_file, 'rb') as f:
-        #         test_predictions = pickle.load(f)
-        #     all_test_predictions.append(test_predictions)
-        #     continue
+        fold_predictions_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_fold_{fold}_test_predictions.pkl'
             
         # Split the hidden states
         val_hidden_states = split_states_on_idx(train_hidden_states, val_indices)
@@ -266,58 +205,45 @@ def main():
         train_labels_split = train_labels[train_indices]
           
         try:
-            controller.load(concept=f'toxic_chat_fold_{fold}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.load(concept=f'toxic_chat_fold_{fold}_prompt_{prompt_version}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
             controller.compute_directions(train_hidden_states_split, train_labels_split, val_hidden_states, val_labels)
-            controller.save(concept=f'toxic_chat_fold_{fold}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.save(concept=f'toxic_chat_fold_{fold}_prompt_{prompt_version}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
 
         # Evaluate on validation and test sets
-        val_metrics, test_metrics, _, test_predictions = controller.evaluate_directions(
+        _, _, _, test_predictions = controller.evaluate_directions(
+            train_hidden_states_split, train_labels_split,
             val_hidden_states, val_labels,
             test_hidden_states, test_labels,
             n_components=n_components,
-            use_logistic=use_logistic,
-            use_rfm=use_rfm,
-            unsupervised=unsupervised,
+            agg_model=control_method,
         )
         
-        # Save fold-specific metrics and predictions
-        out_name = f'{results_dir}/{model_name}_{original_control_method}_fold_{fold}_val_metrics.pkl'
-        with open(out_name, 'wb') as f:
-            pickle.dump(val_metrics, f)
-            
-        out_name = f'{results_dir}/{model_name}_{original_control_method}_fold_{fold}_test_metrics.pkl'
-        with open(out_name, 'wb') as f:
-            pickle.dump(test_metrics, f)
-            
-        # Save test predictions for this fold
-        with open(fold_predictions_file, 'wb') as f:
-            pickle.dump(test_predictions, f)
-            
         # Store test predictions for this fold
         all_test_predictions.append(test_predictions)
     
-    avg_agg_test_predictions = np.mean([p['aggregation'].cpu().numpy() for p in all_test_predictions], axis=0)
-    avg_best_layer_test_predictions = np.mean([p['best_layer'].cpu().numpy() for p in all_test_predictions], axis=0)
 
-    avg_test_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_bagged_aggregated_predictions.pkl'
-    with open(avg_test_predictions_file, 'wb') as f:
-        pickle.dump(avg_agg_test_predictions, f)
-
-    avg_best_layer_test_predictions_file = f'{results_dir}/{model_name}_{original_control_method}_bagged_best_layer_predictions.pkl'
-    with open(avg_best_layer_test_predictions_file, 'wb') as f:
-        pickle.dump(avg_best_layer_test_predictions, f)
-    
     # Compute and save AUC score
     from direction_utils import compute_prediction_metrics
     agg_metrics = compute_prediction_metrics(avg_agg_test_predictions, test_labels)
     best_layer_metrics = compute_prediction_metrics(avg_best_layer_test_predictions, test_labels)
 
-    agg_metrics_file = f'{results_dir}/{model_name}_{original_control_method}_bagged_aggregated_metrics.pkl'
+    avg_agg_test_predictions = np.mean([p['aggregation'].cpu().numpy() for p in all_test_predictions], axis=0)
+    avg_best_layer_test_predictions = np.mean([p['best_layer'].cpu().numpy() for p in all_test_predictions], axis=0)
+
+    # Save predictions
+    predictions_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_predictions.pkl'
+    with open(predictions_file, 'wb') as f:
+        pickle.dump({
+            'aggregation': avg_agg_test_predictions,
+            'best_layer': avg_best_layer_test_predictions,
+        }, f)
+    
+    agg_metrics_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_aggregated_metrics.pkl'
     with open(agg_metrics_file, 'wb') as f:
         pickle.dump(agg_metrics, f)
 
-    best_layer_metrics_file = f'{results_dir}/{model_name}_{original_control_method}_bagged_best_layer_metrics.pkl'
+    best_layer_metrics_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_best_layer_metrics.pkl'
     with open(best_layer_metrics_file, 'wb') as f:
         pickle.dump(best_layer_metrics, f)
 

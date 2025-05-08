@@ -18,38 +18,28 @@ import torch
 
 NEURAL_CONTROLLERS_DIR = os.environ['NEURAL_CONTROLLERS_DIR']
 
-def get_halubench_data(tokenizer, source_ds='pubmedQA'):
 
+def get_halubench_data(source_ds='pubmedQA', prompt_version='v1'):
     # Load HaluBench dataset
     ds = load_dataset("PatronusAI/HaluBench")['test']
     # Filter for PubMedQA data
     ds = ds.filter(lambda x: x['source_ds'] == source_ds)
 
-    template = "Consider the factuality of the ANSWER to the following QUESTION based on the CONTEXT provided.\n\n"
-    template += "CONTEXT: {context}\n\n"
-    template += "QUESTION: {question}\n\n"
-    template += "ANSWER: {answer}"
+    if prompt_version == 'v1':
+        template = "Is the ANSWER to the following QUESTION correct strictly based on the CONTEXT provided. State 'Yes' if correct, or 'No' if incorrect.\n\n"
+        template += "CONTEXT: {context}\n\n"
+        template += "QUESTION: {question}\n\n"
+        template += "ANSWER: {answer}\n\n"
 
     inputs = []
     labels = []
     for item in ds:
         formatted_str = template.format(context=item['passage'], question=item['question'], answer=item['answer'])
-        chat = [
-            {
-                "role": "user", 
-                "content": formatted_str
-            },
-        ]
-        inputs.append(tokenizer.apply_chat_template(chat, tokenize=False))
+        inputs.append(formatted_str)
         labels.append(int(item['label']=='FAIL'))
 
-    print("="*100)
-    print("inputs", inputs[0])
-    print("="*100)
-    print("labels", labels[0])
-    print("="*100)
-    # Split dataset into train and test
     return np.array(inputs), np.array(labels)
+
 
 def get_cross_val_splits(n_total, n_folds=5, source_ds=''):
     """
@@ -137,8 +127,9 @@ def main():
     parser.add_argument('--control_method', type=str, default='rfm')
     parser.add_argument('--model_name', type=str, default='llama_3.3_70b_4bit_it')
     parser.add_argument('--n_components', type=int, default=2)
-    parser.add_argument('--source_ds', type=str, default='FinanceBench')
+    parser.add_argument('--source_ds', type=str, default='RAGTruth')
     parser.add_argument('--n_folds', type=int, default=10)
+    parser.add_argument('--prompt_version', type=str, default='v1')
     args = parser.parse_args()
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")
@@ -148,28 +139,30 @@ def main():
     n_components = args.n_components
     source_ds = args.source_ds
     n_folds = args.n_folds
+    prompt_version = args.prompt_version
 
-    unsupervised = control_method=='pca'
     if control_method not in ['rfm']:
         n_components=1
-        
-    use_logistic=(control_method=='logistic')
-    
-    original_control_method = str(control_method)
-    if control_method=='rfm':
-        use_rfm=True
-    else:
-        use_rfm=False
 
     language_model, tokenizer = load_model(model=model_name)
-    inputs, labels = get_halubench_data(tokenizer, source_ds)
+    unformatted_inputs, labels = get_halubench_data(source_ds, prompt_version)
+
+    inputs = []
+    for prompt in unformatted_inputs:
+        chat = [
+            {
+                "role": "user", 
+                "content": prompt
+            },
+        ]
+        inputs.append(tokenizer.apply_chat_template(chat, tokenize=False))
 
     print("Number of inputs", len(inputs))
     print("Number of labels", len(labels))
 
     print("Getting hidden states")
     hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
-                                      f'{source_ds}_{model_name}_unsupervised_{unsupervised}.pth')
+                                      f'{source_ds}_{model_name}_prompt_{prompt_version}.pth')
     if os.path.exists(hidden_states_path):
         with open(hidden_states_path, 'rb') as f:
             hidden_states = pickle.load(f) 
@@ -220,20 +213,19 @@ def main():
 
         try:
             print(f"Loading directions for fold {fold}")
-            controller.load(concept=f'{source_ds}_fold_{fold}_out_of_{n_folds}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.load(concept=f'{source_ds}_fold_{fold}_out_of_{n_folds}_prompt_{prompt_version}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
             print(f"Computing directions for fold {fold}")
             controller.compute_directions(train_hidden_states_on_fold, train_labels_on_fold, val_hidden_states_on_fold, val_labels_on_fold)
-            controller.save(concept=f'{source_ds}_fold_{fold}_out_of_{n_folds}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.save(concept=f'{source_ds}_fold_{fold}_out_of_{n_folds}_prompt_{prompt_version}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
 
         # Train on training set, validate on validation set, final evaluation on test set
         val_metrics, test_metrics, _, test_predictions = controller.evaluate_directions(
+            train_hidden_states_on_fold, train_labels_on_fold,
             val_hidden_states_on_fold, val_labels_on_fold,
             test_hidden_states_on_fold, test_labels_on_fold,
             n_components=n_components,
-            use_logistic=use_logistic,
-            use_rfm=use_rfm,
-            unsupervised=unsupervised,
+            agg_model=control_method,
         )
         
         all_best_layer_predictions.append(test_predictions['best_layer'])
@@ -244,11 +236,11 @@ def main():
         results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/halubench_results/{source_ds}'
         os.makedirs(results_dir, exist_ok=True)
         
-        out_name = f'{results_dir}/{model_name}_{original_control_method}_fold_{fold}_val_metrics.pkl'
+        out_name = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_fold_{fold}_val_metrics.pkl'
         with open(out_name, 'wb') as f:
             pickle.dump(val_metrics, f)
 
-        out_name = f'{results_dir}/{model_name}_{original_control_method}_fold_{fold}_test_metrics.pkl'
+        out_name = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_fold_{fold}_test_metrics.pkl'
         with open(out_name, 'wb') as f:
             pickle.dump(test_metrics, f)
 
@@ -263,8 +255,6 @@ def main():
     all_aggregated_predictions = all_aggregated_predictions[sorted_order]
     all_idx = all_idx[sorted_order]
 
-    assert torch.allclose(all_idx, torch.arange(len(all_idx)))
-
     # Compute and save overall metrics
     best_layer_metrics = compute_overall_metrics(all_best_layer_predictions, labels)
     aggregated_metrics = compute_overall_metrics(all_aggregated_predictions, labels)
@@ -275,21 +265,21 @@ def main():
     print(f"Aggregated F1: {aggregated_metrics['f1']:.3f}")
 
     # Save overall metrics and predictions
-    out_name = f'{results_dir}/{model_name}_{original_control_method}_best_layer_metrics.pkl'
+    out_name = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_best_layer_metrics.pkl'
     with open(out_name, 'wb') as f:
         pickle.dump(best_layer_metrics, f)
 
-    out_name = f'{results_dir}/{model_name}_{original_control_method}_aggregated_metrics.pkl'
+    out_name = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_aggregated_metrics.pkl'
     with open(out_name, 'wb') as f:
         pickle.dump(aggregated_metrics, f)
-        
-    out_name = f'{results_dir}/{model_name}_{original_control_method}_all_predictions.pkl'
-    with open(out_name, 'wb') as f:
-        pickle.dump(all_best_layer_predictions, f)
 
-    out_name = f'{results_dir}/{model_name}_{original_control_method}_aggregated_predictions.pkl'
-    with open(out_name, 'wb') as f:
-        pickle.dump(all_aggregated_predictions, f)
+    # Save predictions
+    predictions_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_predictions.pkl'
+    with open(predictions_file, 'wb') as f:
+        pickle.dump({
+            'aggregation': all_aggregated_predictions,
+            'best_layer': all_best_layer_predictions,
+        }, f)
 
 if __name__ == '__main__':              
     main()

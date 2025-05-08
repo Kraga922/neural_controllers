@@ -11,14 +11,12 @@ RESULTS_DIR = f'{NEURAL_CONTROLLERS_DIR}/results'
 
 from utils import load_model
 import re
-import json
 import torch
 import pickle
 from tqdm import tqdm
-import gc
+from fava import get_fava_annotated_data
 
 from openai import OpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from abc import ABC, abstractmethod
 import direction_utils
 from bs4 import BeautifulSoup
@@ -61,24 +59,6 @@ def modify(s):
         if elem.parent.name != "delete":
             s1 += elem
     return s1, int(sum(indicator)>0)
-
-def get_fava_annotated_data():
-    # Specify the path to your JSON file
-    file_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/fava/annotations.json'
-
-    # Open and read the JSON file
-    with open(file_path, 'r') as file:
-        data = json.load(file)
-
-    inputs = []
-    labels = []
-    for d in data:
-        s = d['annotated']
-        i, label = modify(s)
-        labels.append(label)
-        inputs.append(i)
-    return inputs, labels
-
 
 class HallucinationJudge(ABC):
     def __init__(self, judge_prompt):
@@ -295,55 +275,24 @@ def main():
     parser.add_argument('--control_method', type=str, default='rfm')
     parser.add_argument('--judge_type', type=str, choices=['openai', 'llama', 'gemma'], default='llama')
     parser.add_argument('--judge_model', type=str, default='llama_3.3_70b_4bit_it', choices=['llama_3.3_70b_4bit_it', 'gpt-4o'])
-    parser.add_argument('--n_seeds', type=int, default=5)
-    parser.add_argument('--n_train', type=int, default=0)
-    parser.add_argument('--n_val', type=int, default=360)
+    parser.add_argument('--prompt_version', type=str, default='v1')
     args = parser.parse_args()
     
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")
     
-    inputs, labels = get_fava_annotated_data()
+    inputs, labels = get_fava_annotated_data(prompt_version=args.prompt_version)
     out_name = f'{RESULTS_DIR}/fava_annotated_results/splits_ntrain_{args.n_train}_nval_{args.n_val}_ntotal_460_nseeds_{args.n_seeds}.pkl'
     with open(out_name, 'rb') as f:
         splits = pickle.load(f)
     
-    judge_prompt = "Consider hallucinations of the following types:\n"
-    judge_prompt += (
-        "(1a) Entity : Contradictory entity errors are a sub-category within Type 1, "
-        "where an entity in a statement is incorrect and changing that single entity "
-        "can make the entire sentence factually correct.\n"
-        
-        "(1b) Relation : Contradictory relation errors are another sub-category within "
-        "contradictory statements where a semantic relationship (e.g., verbs, prepositions, "
-        "or adjectives) in a statement is incorrect.\n"
-        
-        "(1c) Sentence : Contradictory sentence errors refer to cases where a full statement "
-        "entirely contradicts relevant evidence from the web, and cannot be solved via "
-        "phrase-level edits.\n"
-        
-        "(2) Invented : Invented errors refer to statements where the LM generates an entirely "
-        "fabricated entity that doesn't exist based on world knowledge. Fictional entities in "
-        "creative work aren't included.\n"
-        
-        "(3) Subjective : Subjective errors refer to expressions about existing entities that "
-        "lack universal validity. These statements often do not contain facts and are influenced "
-        "by personal beliefs or opinions.\n"
-        
-        "(4) Unverifiable : These are statements where the LM output contains facts, but no "
-        "retrieved.\n\n"
-    )
-    judge_prompt += (
-        'Based on the above definition, does the following statement contain a hallucination? '
-        'Simply state yes or no.\nStatement: {statement}'
-    )
     
     if args.judge_type == 'openai':
-        judge = OpenAIJudge(judge_prompt, args.judge_model)
+        judge = OpenAIJudge(args.judge_model)
     elif args.judge_type == 'llama':
-        judge = LlamaJudge(judge_prompt, args.judge_model)
+        judge = LlamaJudge(args.judge_model)
     elif args.judge_type == 'gemma':
-        judge = GemmaJudge(judge_prompt, args.judge_model)
+        judge = GemmaJudge(args.judge_model)
 
     # Try to load predictions or generate new ones
     all_predictions, all_probabilities = load_predictions(args.judge_type, args.judge_model)

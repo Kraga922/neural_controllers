@@ -26,23 +26,16 @@ def read_hallucination_prompts_from_lines(lines):
         dicts.append(x)
     return dicts
 
-def get_halu_eval_data(tokenizer, hal_type):
-    qa_template = "Consider the factuality of the ANSWER to the following QUESTION.\n\n"
-    qa_template += 'QUESTION: {question}\n\nANSWER: {answer}'
+def get_halu_eval_data(hal_type, prompt_version='v1'):
+    if prompt_version == 'v1':
+        qa_template = "Is the ANSWER to the following QUESTION factual? State yes or no.\n\n"
+        qa_template += 'QUESTION: {question}\n\nANSWER: {answer}'
 
-    general_template = "Consider the factuality of the RESPONSE to the following QUERY.\n\n"
-    general_template += 'QUERY: {query}\n\nRESPONSE: {response}'
+        general_template = "Is the RESPONSE to the following QUERY factual? State yes or no.\n\n"
+        general_template += 'QUERY: {query}\n\nRESPONSE: {response}'
 
     if hal_type=='qa':
         data_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval/qa_data.txt'
-        chat = [
-            {
-                "role": "user", 
-                "content": qa_template
-            },
-        ]
-        wrapped_qa_template = tokenizer.apply_chat_template(chat, tokenize=False)
-
         with open(data_path, 'r') as f:
             lines = f.readlines()
             raw_prompts = read_hallucination_prompts_from_lines(lines)
@@ -55,8 +48,8 @@ def get_halu_eval_data(tokenizer, hal_type):
         train_inputs = []
         train_labels = []
         for prompt in clean_train_prompts:
-            x_true = wrapped_qa_template.format(knowledge=prompt['knowledge'], question=prompt['question'], answer=prompt['right_answer'])
-            x_false = wrapped_qa_template.format(knowledge=prompt['knowledge'], question=prompt['question'], answer=prompt['hallucinated_answer'])
+            x_true = qa_template.format(question=prompt['question'], answer=prompt['right_answer'])
+            x_false = qa_template.format(question=prompt['question'], answer=prompt['hallucinated_answer'])
             train_inputs.append(x_true)
             train_inputs.append(x_false)
             train_labels += [0,1]
@@ -73,14 +66,6 @@ def get_halu_eval_data(tokenizer, hal_type):
     elif hal_type=='general':
         # Get QA data for training
         qa_data_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval/qa_data.txt'
-        chat = [
-            {
-                "role": "user", 
-                "content": qa_template
-            },
-        ]
-        wrapped_qa_template = tokenizer.apply_chat_template(chat, tokenize=False)
-
         with open(qa_data_path, 'r') as f:
             lines = f.readlines()
             raw_train_prompts = read_hallucination_prompts_from_lines(lines)
@@ -92,22 +77,14 @@ def get_halu_eval_data(tokenizer, hal_type):
         train_inputs = []
         train_labels = []
         for prompt in train_prompts:
-            x_true = wrapped_qa_template.format(knowledge=prompt['knowledge'], question=prompt['question'], answer=prompt['right_answer'])
-            x_false = wrapped_qa_template.format(knowledge=prompt['knowledge'], question=prompt['question'], answer=prompt['hallucinated_answer'])
+            x_true = qa_template.format(knowledge=prompt['knowledge'], question=prompt['question'], answer=prompt['right_answer'])
+            x_false = qa_template.format(knowledge=prompt['knowledge'], question=prompt['question'], answer=prompt['hallucinated_answer'])
             train_inputs.append(x_true)
             train_inputs.append(x_false)
             train_labels += [0,1]
             
         # Get general data for evaluation
         data_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval/general_data.txt'
-        chat = [
-            {
-                "role": "user", 
-                "content": general_template
-            },
-        ]
-        wrapped_general_template = tokenizer.apply_chat_template(chat, tokenize=False)
-        
         with open(data_path, 'r') as f:
             lines = f.readlines()
             eval_prompts = read_hallucination_prompts_from_lines(lines)
@@ -115,37 +92,9 @@ def get_halu_eval_data(tokenizer, hal_type):
         test_inputs = []
         test_labels = []
         for prompt in eval_prompts:
-            x = wrapped_general_template.format(query=prompt['user_query'], response=prompt['chatgpt_response'])
+            x = general_template.format(query=prompt['user_query'], response=prompt['chatgpt_response'])
             test_inputs.append(x)
             test_labels.append(int(prompt['hallucination'].lower().strip() == 'yes'))
-
-
-    elif hal_type=='general_no_transfer':
-        data_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval/general_data.txt'
-        chat = [
-            {
-                "role": "user", 
-                "content": general_template
-            },
-        ]
-        wrapped_general_template = tokenizer.apply_chat_template(chat, tokenize=False)
-        
-        with open(data_path, 'r') as f:
-            lines = f.readlines()
-            eval_prompts = read_hallucination_prompts_from_lines(lines)
-            
-        inputs = []
-        labels = []
-        for prompt in eval_prompts:
-            x = wrapped_general_template.format(query=prompt['user_query'], response=prompt['chatgpt_response'])
-            inputs.append(x)
-            labels.append(int(prompt['hallucination'].lower().strip() == 'yes'))
-
-        # Split into train and test
-        train_inputs = inputs[:int(len(inputs)//2)]
-        train_labels = labels[:int(len(labels)//2)]
-        test_inputs = inputs[int(len(inputs)//2):]
-        test_labels = labels[int(len(labels)//2):]
 
     return train_inputs, np.array(train_labels), test_inputs, np.array(test_labels)
 
@@ -199,6 +148,7 @@ def main():
     parser.add_argument('--n_components', type=int, default=1)
     parser.add_argument('--hal_type', type=str, default='qa')
     parser.add_argument('--n_seeds', type=int, default=5)
+    parser.add_argument('--prompt_version', type=str, default='v1')
     args = parser.parse_args()
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")
@@ -207,23 +157,10 @@ def main():
     model_name = args.model_name
     n_components = args.n_components
     hal_type = args.hal_type
-    n_seeds = args.n_seeds
+    prompt_version = args.prompt_version
 
-    unsupervised = control_method=='pca'
     if control_method not in ['rfm']:
         n_components=1
-        
-    use_logistic=(control_method=='logistic')
-    
-    original_control_method = str(control_method)
-    use_rfm = False
-    if control_method=='rfm':
-        use_rfm=True
-    else:
-        use_rfm=False
-        
-    if control_method=='logistic_concat':
-        use_logistic=True
     
     print("Num components:", n_components)
     
@@ -235,18 +172,11 @@ def main():
             control_method=control_method,
             rfm_iters=5,
             batch_size=1
-        )
-    
-    train_inputs, train_labels, test_inputs, test_labels = get_halu_eval_data(tokenizer, hal_type)
+    )
+    unformatted_train_inputs, train_labels, unformatted_test_inputs, test_labels = get_halu_eval_data(hal_type, prompt_version)
 
-
-    num_test_hallucinated = np.sum(test_labels)
-    num_test_clean = len(test_labels) - num_test_hallucinated
-    print(f"Number of test hallucinated: {num_test_hallucinated}, Number of test clean: {num_test_clean}")
-
-    num_train_hallucinated = np.sum(train_labels)
-    num_train_clean = len(train_labels) - num_train_hallucinated
-    print(f"Number of train hallucinated: {num_train_hallucinated}, Number of train clean: {num_train_clean}")
+    train_inputs = [controller.format_prompt(x) for x in unformatted_train_inputs]
+    test_inputs = [controller.format_prompt(x) for x in unformatted_test_inputs]
 
     print("="*100)
     print(train_inputs[0])
@@ -258,7 +188,7 @@ def main():
     print(test_labels[0])
     print("="*100)
     train_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
-                                      f'halu_eval_{hal_type}_{model_name}_unsupervised_{unsupervised}_train.pth')
+                                      f'halu_eval_{hal_type}_{model_name}_train.pth')
     if os.path.exists(train_hidden_states_path):
         with open(train_hidden_states_path, 'rb') as f:
             train_hidden_states = pickle.load(f)
@@ -273,7 +203,7 @@ def main():
 
     print("Getting test hidden states")
     test_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
-                                      f'halu_eval_{hal_type}_{model_name}_unsupervised_{unsupervised}_test.pth')
+                                      f'halu_eval_{hal_type}_{model_name}_test.pth')
     if os.path.exists(test_hidden_states_path):
         with open(test_hidden_states_path, 'rb') as f:
             test_hidden_states = pickle.load(f) 
@@ -315,20 +245,17 @@ def main():
             val_hidden_states_on_seed, val_labels_on_seed,
             test_hidden_states_on_seed, test_labels_on_seed,
             n_components=n_components,
-            use_logistic=use_logistic,
-            use_rfm=use_rfm,
-            unsupervised=unsupervised,
         )
         print("Done evaluating directions")
 
         print("Saving results")
         results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/halu_eval_results'
         os.makedirs(results_dir, exist_ok=True)
-        out_name = f'{results_dir}/{model_name}_{original_control_method}_seed_{seed}_{hal_type}_val_metrics.pkl'
+        out_name = f'{results_dir}/{model_name}_{control_method}_seed_{seed}_{hal_type}_prompt_{prompt_version}_val_metrics.pkl'
         with open(out_name, 'wb') as f:
             pickle.dump(val_metrics, f)
 
-        out_name = f'{results_dir}/{model_name}_{original_control_method}_seed_{seed}_{hal_type}_test_metrics.pkl'
+        out_name = f'{results_dir}/{model_name}_{control_method}_seed_{seed}_{hal_type}_prompt_{prompt_version}_test_metrics.pkl'
         with open(out_name, 'wb') as f:
             pickle.dump(test_metrics, f)
         print("Done saving results")

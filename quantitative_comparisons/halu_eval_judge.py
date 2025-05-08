@@ -22,56 +22,6 @@ from utils import load_model
 from sklearn.metrics import roc_auc_score
 import json
 
-def read_hallucination_prompts_from_lines(lines):
-    dicts = []
-    for line in lines:
-        x = json.loads(line)
-        dicts.append(x)
-    return dicts
-
-def get_judge_halu_eval_data(hal_type):
-    qa_template = "Is the ANSWER to the following QUESTION factual? Simply state yes or no.\n\n"
-    qa_template += 'QUESTION: {question}\n\nANSWER: {answer}'
-
-    general_template = "Is the RESPONSE to the following QUERY factual? Simply state yes or no.\n\n"
-    general_template += 'QUERY: {query}\n\nRESPONSE: {response}'
-
-    if hal_type=='qa':
-        data_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval/qa_data.txt'
-        with open(data_path, 'r') as f:
-            lines = f.readlines()
-            raw_prompts = read_hallucination_prompts_from_lines(lines)
-
-        n = len(raw_prompts)
-        clean_eval_prompts = raw_prompts[int(n//2):]
-        
-        inputs = []
-        labels = []
-        for prompt in clean_eval_prompts:
-            x_true = qa_template.format(knowledge=prompt['knowledge'], question=prompt['question'], answer=prompt['right_answer'])
-            x_false = qa_template.format(knowledge=prompt['knowledge'], question=prompt['question'], answer=prompt['hallucinated_answer'])
-            inputs.append(x_true)
-            inputs.append(x_false)
-            labels += [0,1]
-            
-    elif hal_type=='general':
-      
-        # Get general data for evaluation
-        data_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval/general_data.txt'
-
-        with open(data_path, 'r') as f:
-            lines = f.readlines()
-            eval_prompts = read_hallucination_prompts_from_lines(lines)
-            
-        inputs = []
-        labels = []
-        for prompt in eval_prompts:
-            x = general_template.format(query=prompt['user_query'], response=prompt['chatgpt_response'])
-            inputs.append(x)
-            labels.append(int(prompt['hallucination'].lower().strip() == 'yes'))
-    
-    return inputs, labels
-
 
 class HallucinationJudge(ABC):
     def __init__(self, judge_prompt):

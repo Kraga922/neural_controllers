@@ -18,28 +18,10 @@ from abc import ABC, abstractmethod
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from halubench import get_halubench_data
+
 NEURAL_CONTROLLERS_DIR = os.environ.get('NEURAL_CONTROLLERS_DIR', str(Path(__file__).parent.parent))
 RESULTS_DIR = f'{NEURAL_CONTROLLERS_DIR}/results'
-
-def get_halubench_data(source_ds='pubmedQA'):
-    # Load HaluBench dataset
-    ds = load_dataset("PatronusAI/HaluBench")['test']
-    # Filter for PubMedQA data
-    ds = ds.filter(lambda x: x['source_ds'] == source_ds)
-
-    template = "Consider the correctness of the ANSWER to the following QUESTION based on the CONTEXT provided. Is the ANSWER correct? Simply state 'Yes' or 'No'.\n\n"
-    template += "CONTEXT: {context}\n\n"
-    template += "QUESTION: {question}\n\n"
-    template += "ANSWER: {answer}\n\n"
-
-    inputs = []
-    labels = []
-    for item in ds:
-        formatted_str = template.format(context=item['passage'], question=item['question'], answer=item['answer'])
-        inputs.append(formatted_str)
-        labels.append(int(item['label']=='FAIL'))
-
-    return np.array(inputs), np.array(labels)
 
 def compute_metrics(predictions, labels, threshold=0.5):
     """

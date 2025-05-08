@@ -14,8 +14,7 @@ from sklearn.metrics import roc_auc_score
 from copy import deepcopy
 from tqdm import tqdm
 
-from utils import preds_to_proba, split_indices
-from calibration import PlattCalibration
+from utils import preds_to_proba
 
 # For scaling linear probe beyond ~50k datapoints.
 def batch_transpose_multiply(A, B, mb_size=5000):
@@ -362,23 +361,18 @@ def logistic_solve(X, y, C=1):
     
     return beta.T, bias
 
-def aggregate_layers(layer_outputs, val_y, test_y, use_logistic=False, use_rfm=False, tuning_metric='auc'):
+def aggregate_layers(layer_outputs, train_y, val_y, test_y, agg_model='linear', tuning_metric='auc'):
     
     # solve aggregator on validation set
+    train_X = torch.concat(layer_outputs['train'], dim=1) # (n, num_layers*n_components)    
     val_X = torch.concat(layer_outputs['val'], dim=1) # (n, num_layers*n_components)    
-    test_X = torch.concat(layer_outputs['test'], dim=1)
+    test_X = torch.concat(layer_outputs['test'], dim=1) # (n, num_layers*n_components)    
 
-    # split validation set into train and val
-    train_indices, val_indices = split_indices(len(val_y))
-    train_y = val_y[train_indices]
-    val_y = val_y[val_indices]
-    train_X = val_X[train_indices]
-    val_X = val_X[val_indices]
     print("train_X", train_X.shape, "val_X", val_X.shape, "test_X", test_X.shape)
 
     maximize_metric = (tuning_metric in ['f1', 'auc', 'acc'])
 
-    if use_rfm:
+    if agg_model=='rfm':
         # bw_search_space = [5, 10, 20]
         # reg_search_space = [1e-4, 1e-3, 1e-2]
         # kernel_search_space = ['l2_high_dim']
@@ -422,7 +416,7 @@ def aggregate_layers(layer_outputs, val_y, test_y, use_logistic=False, use_rfm=F
         metrics = compute_prediction_metrics(test_preds, test_y)
         return metrics, None, None, test_preds
     
-    elif use_logistic:
+    elif agg_model=='logistic':
         C_search_space = [1000, 100, 10, 1, 1e-1, 1e-2]
         best_logistic_params = None
         best_logistic_score = float('-inf') if maximize_metric else float('inf')
@@ -438,7 +432,7 @@ def aggregate_layers(layer_outputs, val_y, test_y, use_logistic=False, use_rfm=F
 
         agg_beta, agg_bias = best_logistic_params
 
-    else:
+    elif agg_model=='linear':
         reg_search_space = [1e-4, 1e-3, 1e-2, 1e-1, 1, 1e1]
         best_linear_params = None
         best_linear_score = float('-inf') if maximize_metric else float('inf')
@@ -453,6 +447,9 @@ def aggregate_layers(layer_outputs, val_y, test_y, use_logistic=False, use_rfm=F
                 best_linear_params = (agg_beta, agg_bias)
 
         agg_beta, agg_bias = best_linear_params
+
+    else:
+        raise ValueError(f"Invalid aggregation model: {agg_model}")
 
     # evaluate aggregated predictor on test set
     test_preds = test_X@agg_beta + agg_bias
@@ -493,13 +490,7 @@ def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y,
                     model = xRFM(rfm_params, device='cuda', tuning_metric=tuning_metric)
                     model.fit(train_X, train_y, val_X, val_y)
 
-                    if hyperparams.get('calibrate', False):
-                        model.calibrator = PlattCalibration()
-                        model.calibrator.fit(model.predict_proba(val_X), val_y)
-                        uncalibrated_preds = model.predict_proba(val_X)
-                        pred_proba = model.calibrator.predict(uncalibrated_preds)
-                    else:
-                        pred_proba = model.predict_proba(val_X)
+                    pred_proba = model.predict_proba(val_X)
 
                     val_score = compute_prediction_metrics(pred_proba, val_y)[tuning_metric]
 

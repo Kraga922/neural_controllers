@@ -10,6 +10,7 @@ NEURAL_CONTROLLERS_DIR = os.environ.get('NEURAL_CONTROLLERS_DIR', os.path.dirnam
 RESULTS_DIR = f'{NEURAL_CONTROLLERS_DIR}/results'
 
 from utils import load_model
+from multiclass_halu_eval_wild import get_multiclass_halu_eval_wild_data, TYPES
 
 import json
 import torch
@@ -41,39 +42,8 @@ def read_json_to_list(file_path):
         raise ValueError("JSON content is not a list.")
 
 
-TYPES = ['confused / erroneous queries', 'inappropriate content', 'complex reasoning', 
-         'out-of-scope information', 'beyond-modality interaction', 'other types']
 
-def get_multiclass_halu_eval_wild_data():
-    data_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval_wild/HaluEval_Wild_6types.json'
-    entries = read_json_to_list(data_path)
-    
-    # Get unique classes from TYPE_MAP
-    classes = TYPES
-    num_classes = len(classes)
 
-    print("classes", classes)
-    
-    inputs = []
-    labels = []
-    ohe_labels = []
-    
-    for entry in entries:
-        query = entry['query']
-        qtype = entry['query_type']
-        inputs.append(query)
-        
-        # Create one-hot encoded label
-        labels.append(qtype)
-
-        label = [0] * num_classes
-        class_idx = classes.index(qtype)
-        label[class_idx] = 1
-        ohe_labels.append(torch.tensor(label))
-    
-    ohe_labels = torch.stack(ohe_labels).reshape(-1, num_classes).cuda().float()
-
-    return inputs, ohe_labels, labels   
 
 class HallucinationJudge(ABC):
     def __init__(self, judge_prompt):
@@ -309,7 +279,7 @@ def main():
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")
 
-    inputs, labels, qtypes = get_multiclass_halu_eval_wild_data()
+    inputs, labels = get_multiclass_halu_eval_wild_data()
 
     splits_dir = f'{RESULTS_DIR}/halu_eval_wild_results'
     os.makedirs(splits_dir, exist_ok=True)
@@ -317,23 +287,12 @@ def main():
     with open(out_name, 'rb') as f:
         splits = pickle.load(f)
 
-    judge_prompt = "Queries that induce hallucinations consist of the following six types. "
-    judge_prompt += "(1) Confused / Erroneous queries: Queries that contain errors in the entity, relation, or sentence. "
-    judge_prompt += "(2) Inappropriate content: Queries that request inappropriate content. "
-    judge_prompt += "(3) Complex reasoning: Queries that require complex reasoning. "
-    judge_prompt += "(4) Out-of-scope information: Queries that ask for information out-of-scope for the LLM. "
-    judge_prompt += "(5) Beyond-modality interaction: Queries that require modalities beyond the abilities of the language model being queried. "
-    judge_prompt += "(6) Other types: Queries that are not out-of-scope, do not require complex reasoning, are not beyond-modality, are not inappropriate, and are not confused or erroneous. " 
-    judge_prompt += "Based on the above definitions, which single category does the following query fall into? Respond just with a number between 1 and 6. "
-    judge_prompt += "For example, your response would be just 'N.' if the query belongs to category N.\n\n"
-    judge_prompt += "Query: {query}"
-
     if args.judge_type == 'openai':
-        judge = OpenAIJudge(judge_prompt, args.judge_model)
+        judge = OpenAIJudge(args.judge_model)
     elif args.judge_type == 'llama':
-        judge = LlamaJudge(judge_prompt, args.judge_model)
+        judge = LlamaJudge(args.judge_model)
     elif args.judge_type == 'gemma':
-        judge = GemmaJudge(judge_prompt, args.judge_model)
+        judge = GemmaJudge(args.judge_model)
  
     
     # Try to load predictions or generate new ones

@@ -13,13 +13,13 @@ import json
 import numpy as np
 import torch
 import pickle
-from tqdm import tqdm
-import gc
+from sklearn.model_selection import train_test_split
 import random
 random.seed(0)
 
 NEURAL_CONTROLLERS_DIR = os.environ['NEURAL_CONTROLLERS_DIR']
-
+TYPES = ['confused / erroneous queries', 'inappropriate content', 'complex reasoning', 
+         'out-of-scope information', 'beyond-modality interaction', 'other types']
 TYPE_MAP = {
     'confused': 'confused / erroneous queries',
     'inappropriate': 'inappropriate content',
@@ -41,97 +41,78 @@ def read_json_to_list(file_path):
         return data
     else:
         raise ValueError("JSON content is not a list.")
-        
-def create_paired_data(pos_examples, neg_examples):
-    # Ensure we have enough examples of each class
-    min_len = min(len(pos_examples), len(neg_examples))
-    max_len = max(len(pos_examples), len(neg_examples))
-    
-    # Randomly sample with replacement if we need more examples
-    if len(pos_examples) < max_len:
-        pos_examples = pos_examples + random.choices(pos_examples, k=max_len-len(pos_examples))
-    if len(neg_examples) < max_len:
-        neg_examples = neg_examples + random.choices(neg_examples, k=max_len-len(neg_examples))
-        
-    # Create pairs
-    paired_data = list(zip(pos_examples, neg_examples))
-    paired_data = [list(x) for x in paired_data]
-    
-    # Create corresponding labels
-    paired_labels = [[1, 0] for _ in range(len(paired_data))]
-    
-    return paired_data, paired_labels
 
-
-def get_multiclass_halu_eval_wild_data(controller):
+def get_multiclass_halu_eval_wild_data(prompt_version='v1'):
     data_path = f'{NEURAL_CONTROLLERS_DIR}/data/hallucinations/halu_eval_wild/HaluEval_Wild_6types.json'
     entries = read_json_to_list(data_path)
     
     # Get unique classes from TYPE_MAP
-    classes = list(TYPE_MAP.values())
+    classes = TYPES
     num_classes = len(classes)
 
-    print("classes", classes)
-    
+    if prompt_version == 'v1':
+        template = "Queries that induce hallucinations consist of the following six types. "
+        template += "(1) Confused / Erroneous queries: Queries that contain errors in the entity, relation, or sentence. "
+        template += "(2) Inappropriate content: Queries that request inappropriate content. "
+        template += "(3) Complex reasoning: Queries that require complex reasoning. "
+        template += "(4) Out-of-scope information: Queries that ask for information out-of-scope for the LLM. "
+        template += "(5) Beyond-modality interaction: Queries that require modalities beyond the abilities of the language model being queried. "
+        template += "(6) Other types: Queries that are not out-of-scope, do not require complex reasoning, are not beyond-modality, are not inappropriate, and are not confused or erroneous. " 
+        template += "Based on the above definitions, which single category does the following query fall into? Respond just with a number between 1 and 6. "
+        template += "For example, your response would be just 'N.' if the query belongs to category N.\n\n"
+        template += "Query: {query}"
+
     inputs = []
-    labels = []
+    ohe_labels = []
     
     for entry in entries:
         query = entry['query']
         qtype = entry['query_type']
-        inputs.append(controller.format_prompt(query))
+        inputs.append(template.format(query=query))
         
-        # Create one-hot encoded label
         label = [0] * num_classes
         class_idx = classes.index(qtype)
         label[class_idx] = 1
-        labels.append(torch.tensor(label))
+        ohe_labels.append(torch.tensor(label))
     
-    labels = torch.stack(labels).reshape(-1, num_classes).cuda().float()
+    ohe_labels = torch.stack(ohe_labels).reshape(-1, num_classes).cuda().float()
 
-    return inputs, labels
+    return inputs, ohe_labels   
 
-
-def get_splits(n_train, n_val, n_total, n_seeds):
+def get_kfold_splits(k_folds, n_total):
+    """
+    Creates k-fold cross validation splits.
+    Args:
+        k_folds (int): Number of folds for cross validation
+        n_total (int): Total number of samples
+    Returns:
+        List of dictionaries containing fold indices
+    """
     results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/halu_eval_wild_results'
     os.makedirs(results_dir, exist_ok=True)
-    out_name = f'{results_dir}/splits_ntrain_{n_train}_nval_{n_val}_ntotal_{n_total}_nseeds_{n_seeds}.pkl'
-    
+    out_name = f'{results_dir}/kfold_splits_k_{k_folds}_ntotal_{n_total}.pkl'
     try:
         with open(out_name, 'rb') as f:
             splits = pickle.load(f)
-        return splits
+            return splits
     except:
-        pass
-
-    splits = []
-    indices = np.arange(n_total)
-    
-    for seed in range(n_seeds):
-        # Set seed for reproducibility
-        np.random.seed(seed)
-        
-        # Shuffle indices for this seed
-        shuffled_indices = indices.copy()
-        np.random.shuffle(shuffled_indices)
-        
-        # Sample train indices
-        train_indices = shuffled_indices[:n_train]
-        remaining_indices = shuffled_indices[n_train:]
-        
-        # Sample validation indices from remaining
-        val_indices = np.random.choice(remaining_indices, size=n_val, replace=False)
-        test_indices = np.setdiff1d(remaining_indices, val_indices)
-        
-        splits.append({
-            'train_indices': train_indices,
-            'val_indices': val_indices,
-            'test_indices': test_indices
-        })
-
+        indices = np.random.permutation(n_total)
+        splits = []
+        fold_size = n_total // k_folds
+        for fold in range(k_folds):
+            start_idx = fold * fold_size
+            end_idx = start_idx + fold_size if fold < k_folds - 1 else n_total
+            test_indices = indices[start_idx:end_idx]
+            train_indices = np.concatenate([indices[:start_idx], indices[end_idx:]])
+            train_indices, val_indices = train_test_split(train_indices, test_size=0.2, random_state=0, shuffle=True)
+            splits.append({
+                'train_indices': train_indices,
+                'val_indices': val_indices,
+                'test_indices': test_indices,
+                'fold': fold
+            })
     with open(out_name, 'wb') as f:
         pickle.dump(splits, f)
-        
     return splits
 
 def split_states_on_idx(inputs, split):
@@ -146,51 +127,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control_method', type=str, default='logistic')
     parser.add_argument('--model_name', type=str, default='llama_3.3_70b_4bit_it', choices=['llama_3_8b_it', 'llama_3.3_70b_4bit_it'])
-    parser.add_argument('--n_seeds', type=int, default=5)
-    parser.add_argument('--n_train', type=int, default=300)
-    parser.add_argument('--n_val', type=int, default=250)
+    parser.add_argument('--k_folds', type=int, default=10)
     parser.add_argument('--n_components', type=int, default=6)
     parser.add_argument('--rfm_iters', type=int, default=10)
-    parser.add_argument('--seed', type=int, default=None)
+    parser.add_argument('--prompt_version', type=str, default='v1')
     args = parser.parse_args()
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")  
 
     control_method = args.control_method
     model_name = args.model_name
-    n_train = args.n_train
-    n_val = args.n_val
-    n_seeds = args.n_seeds
     n_components = args.n_components
-    
-    # Set unsupervised flag based on control method
-    unsupervised = (control_method == 'pca')
-    use_logistic = (control_method == 'logistic')
-    
-    original_control_method = str(control_method)
-    if control_method == 'logistic_rfm':
-        control_method = 'logistic'
-        use_rfm = True
-    elif control_method == 'linear_rfm':
-        control_method = 'linear'
-        use_rfm = True
-    elif control_method == 'rfm_linear':
-        control_method = 'rfm'
-        use_rfm = False
-    elif control_method == 'rfm_logistic':
-        control_method = 'rfm'
-        use_logistic = True
-        use_rfm = False
-    elif control_method == 'rfm':
-        use_rfm = True
-    else:
-        use_rfm = False
-        
-    if control_method=='logistic_concat':
-        use_logistic=True
-        
-    print("Num components:", n_components)
-                        
+    prompt_version = args.prompt_version
+    k_folds = args.k_folds
+
     language_model, tokenizer = load_model(model=model_name)
     controller = NeuralController(
         language_model,
@@ -200,12 +150,22 @@ def main():
         batch_size=2,
         n_components=8
     )  
-    
-    inputs, labels = get_multiclass_halu_eval_wild_data(controller)
+
+    unformatted_inputs, labels = get_multiclass_halu_eval_wild_data(prompt_version)
+    inputs = []
+    for prompt in unformatted_inputs:
+        chat = [
+            {
+                "role": "user", 
+                "content": prompt
+            },
+        ]
+        inputs.append(tokenizer.apply_chat_template(chat, tokenize=False))
+
 
     # Precompute and cache hidden states
     hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
-                                    f'halu_eval_wild_{model_name}_unsupervised_{unsupervised}.pth')
+                                    f'halu_eval_wild_{model_name}_prompt_{prompt_version}.pth')
     if os.path.exists(hidden_states_path):
         with open(hidden_states_path, 'rb') as f:
             hidden_states = pickle.load(f)
@@ -214,51 +174,89 @@ def main():
         hidden_states = get_hidden_states(inputs, language_model, tokenizer, 
                                       controller.hidden_layers, 
                                       controller.hyperparams['forward_batch_size'])
-    
         os.makedirs(os.path.dirname(hidden_states_path), exist_ok=True)
         with open(hidden_states_path, 'wb') as f:
             pickle.dump(hidden_states, f)
 
-    splits = get_splits(n_train, n_val, len(labels), n_seeds)
-    if args.seed is not None:
-        seeds = [args.seed]
-    else:
-        seeds = range(n_seeds)
+
+    # K-fold splits
+    splits = get_kfold_splits(k_folds, len(labels))
+    results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/halu_eval_wild_results'
+    os.makedirs(results_dir, exist_ok=True)
+
+    all_test_predictions = []
+    all_test_labels = []
+    for fold_data in splits:
+        print(f'Fold {fold_data["fold"]+1} of {k_folds}')
+        fold = fold_data['fold']
+        val_indices = fold_data['val_indices']
+        train_indices = fold_data['train_indices']
+        test_indices = fold_data['test_indices']
         
-    for seed in tqdm(seeds):
-        split = splits[seed]
-        
-        train_hidden_states, val_hidden_states, test_hidden_states = split_states_on_idx(hidden_states, split)
-        
-        train_labels = labels[split['train_indices']]
-        val_labels = labels[split['val_indices']]
-        test_labels = labels[split['test_indices']]
+
+        # Split hidden states and labels
+        train_hidden_states = {layer: states[train_indices] for layer, states in hidden_states.items()}
+        val_hidden_states = {layer: states[val_indices] for layer, states in hidden_states.items()}
+        test_hidden_states = {layer: states[test_indices] for layer, states in hidden_states.items()}
+
+        train_labels = labels[train_indices]
+        val_labels = labels[val_indices]
+        test_labels = labels[test_indices]
 
         try:
-            controller.load(concept=f'halu_eval_wild_multiclass_seed_{seed}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.load(concept=f'halu_eval_wild_multiclass_fold_{fold}_prompt_{prompt_version}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
             controller.compute_directions(train_hidden_states, train_labels, val_hidden_states, val_labels)
-            controller.save(concept=f'halu_eval_wild_multiclass_seed_{seed}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.save(concept=f'halu_eval_wild_multiclass_fold_{fold}_prompt_{prompt_version}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
 
-        val_metrics, test_metrics, _, _ = controller.evaluate_directions(
+        _, _, _, test_predictions = controller.evaluate_directions(
+            train_hidden_states, train_labels,
             val_hidden_states, val_labels,
             test_hidden_states, test_labels,
             n_components=n_components,
-            use_logistic=use_logistic,
-            use_rfm=use_rfm,
-            unsupervised=unsupervised,
+            agg_model=control_method,
         )
-        
-        results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/halu_eval_wild_results'
-        os.makedirs(results_dir, exist_ok=True)
-        out_name = f'{results_dir}/multiclass_{model_name}_{original_control_method}_seed_{seed}_val_metrics.pkl'
-        with open(out_name, 'wb') as f:
-            pickle.dump(val_metrics, f)
-            
-        out_name = f'{results_dir}/multiclass_{model_name}_{original_control_method}_seed_{seed}_test_metrics.pkl'
-        with open(out_name, 'wb') as f:
-            pickle.dump(test_metrics, f)
 
+        # Store predictions and labels for this fold
+        all_test_predictions.append((test_indices, test_predictions))
+        all_test_labels.append((test_indices, test_labels.cpu() if hasattr(test_labels, 'cpu') else test_labels))
+
+    # Aggregate predictions and labels over all folds
+    # Sort by original indices to match dataset order
+    all_indices = torch.cat([torch.from_numpy(idx) for idx, _ in all_test_predictions])
+    aggregated_preds = torch.cat([pred['aggregation'] for _, pred in all_test_predictions])
+    best_layer_preds = torch.cat([pred['best_layer'] for _, pred in all_test_predictions])
+    sort_idx = torch.argsort(all_indices).to(aggregated_preds.device)
+
+    aggregated_preds_sorted = aggregated_preds[sort_idx]
+    best_layer_preds_sorted = best_layer_preds[sort_idx]
+
+    # Compute overall metrics
+    from direction_utils import compute_prediction_metrics
+    aggregated_metrics = compute_prediction_metrics(aggregated_preds_sorted, labels)
+    best_layer_metrics = compute_prediction_metrics(best_layer_preds_sorted, labels)
+
+    agg_metrics_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_kfold_aggregated_metrics.pkl'
+    with open(agg_metrics_file, 'wb') as f:
+        pickle.dump(aggregated_metrics, f)
+
+    best_layer_metrics_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_kfold_best_layer_metrics.pkl'
+    with open(best_layer_metrics_file, 'wb') as f:
+        pickle.dump(best_layer_metrics, f)
+
+    # Save predictions
+    predictions_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_predictions.pkl'
+    with open(predictions_file, 'wb') as f:
+        pickle.dump({
+            'aggregation': aggregated_preds_sorted,
+            'best_layer': best_layer_preds_sorted,
+        }, f)
+
+    print('Aggregated k-fold metrics:')
+    print(aggregated_metrics)
+
+    print('Best layer k-fold metrics:')
+    print(best_layer_metrics)
         
 if __name__ == '__main__':              
     main()
