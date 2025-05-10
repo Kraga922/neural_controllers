@@ -21,6 +21,8 @@ NEURAL_CONTROLLERS_DIR = os.environ['NEURAL_CONTROLLERS_DIR']
 def get_prompt(prompt_version):
     if prompt_version == 'v1':
         return 'Toxic content mainly includes offensiveness, sexism, and hateful speech. Does the following query contain toxic content? State yes or no. \n{query}'
+    elif prompt_version == 'empty':
+        return '{query}'
     else:
         raise ValueError(f"Invalid prompt version: {prompt_version}")
 
@@ -111,10 +113,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control_method', type=str, default='rfm')
     parser.add_argument('--model_name', type=str, default='llama_3.3_70b_4bit_it')
-    parser.add_argument('--n_components', type=int, default=1)
+    parser.add_argument('--n_components', type=int, default=3)
     parser.add_argument('--k_folds', type=int, default=10)
     parser.add_argument('--rfm_iters', type=int, default=8)
-    parser.add_argument('--prompt_version', type=str, default='v1')
+    parser.add_argument('--prompt_version', type=str, default='empty')
+    parser.add_argument('--tuning_metric', type=str, default='top_agop_vectors_ols_auc')
     args = parser.parse_args()
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")
@@ -124,9 +127,11 @@ def main():
     n_components = args.n_components
     k_folds = args.k_folds
     prompt_version = args.prompt_version
+    tuning_metric = args.tuning_metric
 
     if control_method not in ['rfm']:
         n_components=1
+        tuning_metric = 'auc'
                             
     language_model, tokenizer = load_model(model=model_name)
     controller = NeuralController(
@@ -134,12 +139,18 @@ def main():
         tokenizer,
         control_method=control_method,
         rfm_iters=args.rfm_iters,
-        batch_size=1
+        batch_size=1,
+        n_components=n_components,
     )  
     controller.name = model_name
     
     # Get base data first
     train_inputs, train_labels, test_inputs, test_labels = get_data(controller, prompt_version) 
+
+
+    print("="*100)
+    print(train_inputs[0])
+    print("="*100)
     
     # Precompute and cache hidden states
     train_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
@@ -189,13 +200,12 @@ def main():
     
     # For each fold
     for fold_data in splits:
+        fold = fold_data['fold']
+        print(f"Fold {fold+1} out of {k_folds}")
+
         val_indices = fold_data['val_indices']
         train_indices = fold_data['train_indices']
-        fold = fold_data['fold']
         
-        # Check if predictions for this fold already exist
-        fold_predictions_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_fold_{fold}_test_predictions.pkl'
-            
         # Split the hidden states
         val_hidden_states = split_states_on_idx(train_hidden_states, val_indices)
         train_hidden_states_split = split_states_on_idx(train_hidden_states, train_indices)
@@ -205,10 +215,12 @@ def main():
         train_labels_split = train_labels[train_indices]
           
         try:
-            controller.load(concept=f'toxic_chat_fold_{fold}_prompt_{prompt_version}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.load(concept=f'toxic_chat_fold_{fold}_prompt_{prompt_version}_tuning_metric_{tuning_metric}_top_k_{n_components}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
-            controller.compute_directions(train_hidden_states_split, train_labels_split, val_hidden_states, val_labels)
-            controller.save(concept=f'toxic_chat_fold_{fold}_prompt_{prompt_version}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.compute_directions(train_hidden_states_split, train_labels_split, 
+                                          val_hidden_states, val_labels, 
+                                          tuning_metric=tuning_metric)
+            controller.save(concept=f'toxic_chat_fold_{fold}_prompt_{prompt_version}_tuning_metric_{tuning_metric}_top_k_{n_components}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
 
         # Evaluate on validation and test sets
         _, _, _, test_predictions = controller.evaluate_directions(
@@ -223,27 +235,30 @@ def main():
         all_test_predictions.append(test_predictions)
     
 
+    all_agg_predictions = [p['aggregation'].cpu().numpy() for p in all_test_predictions] 
+    all_best_layer_predictions = [p['best_layer'].cpu().numpy() for p in all_test_predictions]
+
+    avg_agg_predictions = np.mean(all_agg_predictions, axis=0)
+    avg_best_layer_predictions = np.mean(all_best_layer_predictions, axis=0)
+
     # Compute and save AUC score
     from direction_utils import compute_prediction_metrics
-    agg_metrics = compute_prediction_metrics(avg_agg_test_predictions, test_labels)
-    best_layer_metrics = compute_prediction_metrics(avg_best_layer_test_predictions, test_labels)
-
-    avg_agg_test_predictions = np.mean([p['aggregation'].cpu().numpy() for p in all_test_predictions], axis=0)
-    avg_best_layer_test_predictions = np.mean([p['best_layer'].cpu().numpy() for p in all_test_predictions], axis=0)
+    agg_metrics = compute_prediction_metrics(avg_agg_predictions, test_labels)
+    best_layer_metrics = compute_prediction_metrics(avg_best_layer_predictions, test_labels)
 
     # Save predictions
-    predictions_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_predictions.pkl'
+    predictions_file = f'{results_dir}/toxic_chat-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-predictions.pkl'
     with open(predictions_file, 'wb') as f:
         pickle.dump({
-            'aggregation': avg_agg_test_predictions,
-            'best_layer': avg_best_layer_test_predictions,
+            'aggregation': avg_agg_predictions,
+            'best_layer': avg_best_layer_predictions,
         }, f)
     
-    agg_metrics_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_aggregated_metrics.pkl'
+    agg_metrics_file = f'{results_dir}/toxic_chat-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-aggregated_metrics.pkl'
     with open(agg_metrics_file, 'wb') as f:
         pickle.dump(agg_metrics, f)
 
-    best_layer_metrics_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_best_layer_metrics.pkl'
+    best_layer_metrics_file = f'{results_dir}/toxic_chat-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-best_layer_metrics.pkl'
     with open(best_layer_metrics_file, 'wb') as f:
         pickle.dump(best_layer_metrics, f)
 

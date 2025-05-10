@@ -1,5 +1,6 @@
 import torch
 from sklearn.linear_model import LogisticRegression
+from xrfm import RFM
 
 import direction_utils
 from utils import split_indices, split_train_states
@@ -125,6 +126,9 @@ class RFMToolkit(Toolkit):
         compare_to_linear = kwargs.get('compare_to_linear', False)
         log_spectrum = kwargs.get('log_spectrum', False)
         log_path = kwargs.get('log_path', None)
+        tuning_metric = kwargs.get('tuning_metric', 'auc')
+
+        print("Tuning metric:", tuning_metric)
         
         # Process data and extract hidden states
         (train_hidden_states, val_hidden_states, test_hidden_states, 
@@ -153,10 +157,13 @@ class RFMToolkit(Toolkit):
             train_X, val_X = self.get_layer_data(layer_to_eval, train_hidden_states, val_hidden_states, train_y, val_y, device)
 
             start_time = time.time()
-            rfm_probe = direction_utils.train_rfm_probe_on_concept(train_X, train_y, val_X, val_y, hyperparams)
+            rfm_probe = direction_utils.train_rfm_probe_on_concept(train_X, train_y, val_X, val_y, hyperparams, tuning_metric=tuning_metric)
             end_time = time.time()
             print(f"Time taken to train rfm probe: {end_time - start_time} seconds")
-            concept_features = rfm_probe.collect_best_agops()[0]
+            if isinstance(rfm_probe, RFM):
+                concept_features = rfm_probe.agop_best_model
+            else:
+                concept_features = rfm_probe.collect_best_agops()[0]
 
             if compare_to_linear:
                 _ = direction_utils.train_linear_probe_on_concept(train_X, train_y, val_X, val_y)
@@ -251,7 +258,7 @@ class LinearProbeToolkit(Toolkit):
         super().__init__()
 
     def _compute_directions(self, train_data, train_labels, val_data, val_labels, model, tokenizer, hidden_layers, hyperparams,
-                            test_data=None, test_labels=None, device='cuda'):
+                            test_data=None, test_labels=None, device='cuda', **kwargs):
         
         # Process data and extract hidden states
         (train_hidden_states, val_hidden_states, test_hidden_states, 
@@ -360,7 +367,7 @@ class LogisticRegressionToolkit(Toolkit):
         super().__init__()
 
     def _compute_directions(self, train_data, train_labels, val_data, val_labels, model, tokenizer, hidden_layers, hyperparams,
-                            test_data=None, test_labels=None, device='cuda'):
+                            test_data=None, test_labels=None, device='cuda', **kwargs):
                 
         # Process data and extract hidden states
         (train_hidden_states, val_hidden_states, test_hidden_states, 

@@ -10,59 +10,19 @@ NEURAL_CONTROLLERS_DIR = os.environ['NEURAL_CONTROLLERS_DIR']
 RESULTS_DIR = f'{NEURAL_CONTROLLERS_DIR}/results'
 
 from utils import load_model
-import re
 import torch
 import pickle
 from tqdm import tqdm
 from fava import get_fava_annotated_data
 
 from openai import OpenAI
+from anthropic import Anthropic
 from abc import ABC, abstractmethod
 import direction_utils
-from bs4 import BeautifulSoup
-
-_TAGS = ["entity", "relation", "sentence", "invented", "subjective", "unverifiable"]
-
-def remove_deleted_text(text):
-    # Use regex to match text between <delete> and </delete> tags
-    regex = r'<delete>.*?</delete>'
-    
-    # Replace all matches with empty string
-    # re.DOTALL flag (s) allows matching across multiple lines
-    return re.sub(regex, '', text, flags=re.DOTALL)
-
-def remove_empty_tags(html_content):
-    # Pattern to match empty tags with optional whitespace between them
-    pattern = r'<(\w+)>\s*</\1>'
-    
-    # Keep removing empty tags until no more changes are made
-    prev_content = None
-    current_content = html_content
-    
-    while prev_content != current_content:
-        prev_content = current_content
-        current_content = re.sub(pattern, '', current_content)
-    
-    return current_content
-
-def modify(s):
-    s = remove_deleted_text(s)
-    s = remove_empty_tags(s)
-
-    indicator = [0, 0, 0, 0, 0, 0]
-    soup = BeautifulSoup(s, "html.parser")
-    s1 = ""
-    for t in range(len(_TAGS)):
-        indicator[t] = len(soup.find_all(_TAGS[t]))
-    # print(soup.find_all(text=True))
-    for elem in soup.find_all(text=True):
-        if elem.parent.name != "delete":
-            s1 += elem
-    return s1, int(sum(indicator)>0)
 
 class HallucinationJudge(ABC):
-    def __init__(self, judge_prompt):
-        self.judge_prompt = judge_prompt
+    def __init__(self):
+        pass
     
     @abstractmethod
     def get_judgement(self, prompt):
@@ -73,7 +33,7 @@ class HallucinationJudge(ABC):
         predictions = []
         probabilities = []  # Store probabilities for AUC calculation
         for input_text in tqdm(inputs):
-            prompt = self.judge_prompt.format(statement=input_text)
+            prompt = input_text  # Use input_text directly as the prompt
             # print("prompt:", prompt)
             
             prediction, probability = self.get_judgement(prompt)
@@ -83,24 +43,22 @@ class HallucinationJudge(ABC):
         
         return torch.tensor(predictions), torch.tensor(probabilities)
     
-    def evaluate_split(self, all_predictions, all_probabilities, all_labels, test_indices):
+    def evaluate_split(self, all_predictions, all_probabilities, all_labels):
         """Evaluate metrics for a specific split using pre-computed predictions."""
-        split_predictions = all_predictions[test_indices]
-        split_probabilities = all_probabilities[test_indices]
-        split_labels = torch.tensor([all_labels[i] for i in test_indices])
-        metrics = direction_utils.compute_prediction_metrics(split_predictions, split_labels)
+        labels = torch.tensor(all_labels)
+        metrics = direction_utils.compute_prediction_metrics(all_predictions, labels)
         
         # Calculate AUC
         from sklearn.metrics import roc_auc_score
 
-        auc = roc_auc_score(split_labels.numpy(), split_probabilities.numpy())
+        auc = roc_auc_score(labels.cpu().numpy(), all_probabilities.cpu().numpy())
         metrics['auc'] = auc
 
         return metrics
 
 class OpenAIJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, judge_model):
-        super().__init__(judge_prompt)
+    def __init__(self, judge_model):
+        super().__init__()
         self.judge_model = judge_model
         self.client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
     
@@ -158,9 +116,68 @@ class OpenAIJudge(HallucinationJudge):
             is_yes = 'y' in response.choices[0].message.content.lower()
             return (is_yes, is_yes)
 
+class AnthropicJudge(HallucinationJudge):
+    def __init__(self, judge_model):
+        super().__init__()
+        self.judge_model = judge_model
+        self.client = Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
+    
+    def get_judgement(self, prompt):
+        print("Prompting Anthropic...")
+        response = self.client.messages.create(
+            model=self.judge_model,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1,
+            temperature=0,
+            logprobs=True,
+            top_logprobs=20
+        )
+        
+        # Extract logprobs from the response
+        logprobs = response.content[0].logprobs[0].tokens[0].top_logprobs
+        yes_prob = None
+        no_prob = None
+        
+        # Find logprobs for Yes/No tokens
+        for token_logprob in logprobs:
+            token = token_logprob.token
+            if token == 'Yes':
+                yes_prob = token_logprob.logprob
+            elif token == 'No':
+                no_prob = token_logprob.logprob
+        
+        # If we didn't find exact "Yes"/"No", look for close matches
+        if yes_prob is None or no_prob is None:
+            for token_logprob in logprobs:
+                token = token_logprob.token
+                if yes_prob is None and ('yes' in token.lower() or 'y' == token.lower()):
+                    yes_prob = token_logprob.logprob
+                elif no_prob is None and ('no' in token.lower() or 'n' == token.lower()):
+                    no_prob = token_logprob.logprob
+        
+        if yes_prob is not None and no_prob is not None:
+            # Convert from log probabilities to probabilities
+            yes_prob_value = torch.exp(torch.tensor(yes_prob)).item()
+            no_prob_value = torch.exp(torch.tensor(no_prob)).item()
+            # Normalize probabilities
+            total = yes_prob_value + no_prob_value
+            yes_prob_norm = yes_prob_value / total if total > 0 else 0.5
+            return (1 if yes_prob > no_prob else 0, yes_prob_norm)
+        elif yes_prob is not None:
+            return (1, 1.0)
+        elif no_prob is not None:
+            return (0, 0.0)
+        else:
+            # Fallback to content
+            content = response.content[0].text
+            is_yes = 'y' in content.lower()
+            return (is_yes, is_yes)
+
 class GemmaJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, judge_model):
-        super().__init__(judge_prompt)
+    def __init__(self, judge_model):
+        super().__init__()
         self.model, self.tokenizer = load_model(judge_model)
         
     def get_judgement(self, prompt):
@@ -207,8 +224,8 @@ class GemmaJudge(HallucinationJudge):
             return (yes_prob > no_prob, yes_prob_norm)
     
 class LlamaJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, judge_model):
-        super().__init__(judge_prompt)
+    def __init__(self, judge_model):
+        super().__init__()
         self.model, self.tokenizer = load_model(judge_model)
         
     def get_judgement(self, prompt):
@@ -255,15 +272,15 @@ class LlamaJudge(HallucinationJudge):
             # Make the decision based on these probabilities
             return (yes_prob > no_prob, yes_prob_norm)
 
-def save_predictions(predictions, probabilities, judge_type, judge_model):
+def save_predictions(predictions, probabilities, judge_type, judge_model, prompt_version):
     """Save all predictions to a file."""
-    out_name = f'{RESULTS_DIR}/fava_annotated_results/{judge_type}_{judge_model}_all_predictions.pkl'
+    out_name = f'{RESULTS_DIR}/fava_annotated_results/{judge_type}_{judge_model}_prompt_{prompt_version}_all_predictions.pkl'
     with open(out_name, 'wb') as f:
         pickle.dump({'predictions': predictions, 'probabilities': probabilities}, f)
 
-def load_predictions(judge_type, judge_model):
+def load_predictions(judge_type, judge_model, prompt_version):
     """Load predictions from file if they exist."""
-    out_name = f'{RESULTS_DIR}/fava_annotated_results/{judge_type}_{judge_model}_all_predictions.pkl'
+    out_name = f'{RESULTS_DIR}/fava_annotated_results/{judge_type}_{judge_model}_prompt_{prompt_version}_all_predictions.pkl'
     if os.path.exists(out_name):
         with open(out_name, 'rb') as f:
             data = pickle.load(f)
@@ -272,9 +289,8 @@ def load_predictions(judge_type, judge_model):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--control_method', type=str, default='rfm')
-    parser.add_argument('--judge_type', type=str, choices=['openai', 'llama', 'gemma'], default='llama')
-    parser.add_argument('--judge_model', type=str, default='llama_3.3_70b_4bit_it', choices=['llama_3.3_70b_4bit_it', 'gpt-4o'])
+    parser.add_argument('--judge_type', type=str, default='llama') #choices=['openai', 'llama', 'gemma', 'anthropic']
+    parser.add_argument('--judge_model', type=str, default='llama_3.3_70b_4bit_it') #choices=['llama_3.3_70b_4bit_it', 'gpt-4o', 'claude-3-opus-20240229']
     parser.add_argument('--prompt_version', type=str, default='v1')
     args = parser.parse_args()
     
@@ -282,45 +298,34 @@ def main():
         print(f"{n_:<20} : {v_}")
     
     inputs, labels = get_fava_annotated_data(prompt_version=args.prompt_version)
-    out_name = f'{RESULTS_DIR}/fava_annotated_results/splits_ntrain_{args.n_train}_nval_{args.n_val}_ntotal_460_nseeds_{args.n_seeds}.pkl'
-    with open(out_name, 'rb') as f:
-        splits = pickle.load(f)
-    
-    
+
     if args.judge_type == 'openai':
         judge = OpenAIJudge(args.judge_model)
     elif args.judge_type == 'llama':
         judge = LlamaJudge(args.judge_model)
     elif args.judge_type == 'gemma':
         judge = GemmaJudge(args.judge_model)
+    elif args.judge_type == 'anthropic':
+        judge = AnthropicJudge(args.judge_model)
 
     # Try to load predictions or generate new ones
-    all_predictions, all_probabilities = load_predictions(args.judge_type, args.judge_model)
+    all_predictions, all_probabilities = load_predictions(args.judge_type, args.judge_model, args.prompt_version)
     if all_predictions is None:
         all_predictions, all_probabilities = judge.get_all_predictions(inputs)
-        save_predictions(all_predictions, all_probabilities, args.judge_type, args.judge_model)
-    
-    # Collect metrics across all seeds
-    all_seed_metrics = []
-    
-    # Iterate over seeds using pre-computed predictions
-    for seed in tqdm(range(args.n_seeds)):
-        split = splits[seed]
-        
-        metrics = judge.evaluate_split(all_predictions, all_probabilities, labels, split['test_indices'])
-        all_seed_metrics.append(metrics)
+        save_predictions(all_predictions, all_probabilities, args.judge_type, args.judge_model, args.prompt_version)
 
-        out_name = f'{RESULTS_DIR}/fava_annotated_results/{args.judge_type}_{args.judge_model}_seed_{seed}_metrics.pkl'
-        with open(out_name, 'wb') as f:
-            pickle.dump(metrics, f)
-    
-    # Calculate and print average metrics across all seeds
-    print("\nAverage metrics across all seeds:")
-    avg_metrics = {}
-    for metric_name in all_seed_metrics[0].keys():
-        avg_metrics[metric_name] = sum(seed_metric[metric_name] for seed_metric in all_seed_metrics) / len(all_seed_metrics)
-        print(f"{metric_name}: {avg_metrics[metric_name]:.4f}")
-        
+    # Evaluate metrics on the whole dataset
+    print("\nMetrics on the whole dataset:")
+    metrics = judge.evaluate_split(all_predictions, all_probabilities, labels)
+    for metric_name, value in metrics.items():
+        print(f"{metric_name}: {value:.4f}")
+
+    # Save metrics to file
+    out_dir = f'{RESULTS_DIR}/fava_annotated_results'
+    os.makedirs(out_dir, exist_ok=True)
+    out_name = f'{out_dir}/fava-{args.judge_type}-{args.judge_model}-prompt_{args.prompt_version}-metrics.pkl'
+    with open(out_name, 'wb') as f:
+        pickle.dump(metrics, f)
 
 if __name__ == '__main__':
     main()

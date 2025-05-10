@@ -126,10 +126,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control_method', type=str, default='rfm')
     parser.add_argument('--model_name', type=str, default='llama_3.3_70b_4bit_it')
-    parser.add_argument('--n_components', type=int, default=2)
+    parser.add_argument('--n_components', type=int, default=3)
     parser.add_argument('--source_ds', type=str, default='RAGTruth')
-    parser.add_argument('--n_folds', type=int, default=10)
+    parser.add_argument('--n_folds', type=int, default=5)
     parser.add_argument('--prompt_version', type=str, default='v1')
+    parser.add_argument('--tuning_metric', type=str, default='top_agop_vectors_ols_auc')
     args = parser.parse_args()
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")
@@ -140,9 +141,11 @@ def main():
     source_ds = args.source_ds
     n_folds = args.n_folds
     prompt_version = args.prompt_version
+    tuning_metric = args.tuning_metric
 
     if control_method not in ['rfm']:
         n_components=1
+        tuning_metric = 'auc'
 
     language_model, tokenizer = load_model(model=model_name)
     unformatted_inputs, labels = get_halubench_data(source_ds, prompt_version)
@@ -173,7 +176,7 @@ def main():
             tokenizer,
             control_method=control_method,
             rfm_iters=5,
-            batch_size=1
+            batch_size=1,
         )
     
         hidden_states = get_hidden_states(inputs, language_model, tokenizer, 
@@ -208,16 +211,17 @@ def main():
             tokenizer,
             control_method=control_method,
             rfm_iters=5,
-            batch_size=1
+            batch_size=1,
+            n_components=n_components
         )
 
         try:
             print(f"Loading directions for fold {fold}")
-            controller.load(concept=f'{source_ds}_fold_{fold}_out_of_{n_folds}_prompt_{prompt_version}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.load(concept=f'{source_ds}_fold_{fold}_out_of_{n_folds}_prompt_{prompt_version}_tuning_metric_{tuning_metric}_top_k_{n_components}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
             print(f"Computing directions for fold {fold}")
-            controller.compute_directions(train_hidden_states_on_fold, train_labels_on_fold, val_hidden_states_on_fold, val_labels_on_fold)
-            controller.save(concept=f'{source_ds}_fold_{fold}_out_of_{n_folds}_prompt_{prompt_version}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.compute_directions(train_hidden_states_on_fold, train_labels_on_fold, val_hidden_states_on_fold, val_labels_on_fold, tuning_metric=tuning_metric)
+            controller.save(concept=f'{source_ds}_fold_{fold}_out_of_{n_folds}_prompt_{prompt_version}_tuning_metric_{tuning_metric}_top_k_{n_components}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
 
         # Train on training set, validate on validation set, final evaluation on test set
         val_metrics, test_metrics, _, test_predictions = controller.evaluate_directions(
@@ -236,11 +240,11 @@ def main():
         results_dir = f'{NEURAL_CONTROLLERS_DIR}/results/halubench_results/{source_ds}'
         os.makedirs(results_dir, exist_ok=True)
         
-        out_name = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_fold_{fold}_val_metrics.pkl'
+        out_name = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_tuning_metric_{tuning_metric}_fold_{fold}_val_metrics.pkl'
         with open(out_name, 'wb') as f:
             pickle.dump(val_metrics, f)
 
-        out_name = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_fold_{fold}_test_metrics.pkl'
+        out_name = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_tuning_metric_{tuning_metric}_fold_{fold}_test_metrics.pkl'
         with open(out_name, 'wb') as f:
             pickle.dump(test_metrics, f)
 
@@ -265,16 +269,16 @@ def main():
     print(f"Aggregated F1: {aggregated_metrics['f1']:.3f}")
 
     # Save overall metrics and predictions
-    out_name = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_best_layer_metrics.pkl'
+    out_name = f'{results_dir}/{source_ds}-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-best_layer_metrics.pkl'
     with open(out_name, 'wb') as f:
         pickle.dump(best_layer_metrics, f)
 
-    out_name = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_aggregated_metrics.pkl'
+    out_name = f'{results_dir}/{source_ds}-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-aggregated_metrics.pkl'
     with open(out_name, 'wb') as f:
         pickle.dump(aggregated_metrics, f)
 
     # Save predictions
-    predictions_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_predictions.pkl'
+    predictions_file = f'{results_dir}/{source_ds}-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-predictions.pkl'
     with open(predictions_file, 'wb') as f:
         pickle.dump({
             'aggregation': all_aggregated_predictions,

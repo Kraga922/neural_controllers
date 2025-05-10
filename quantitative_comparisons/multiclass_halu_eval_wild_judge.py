@@ -12,42 +12,20 @@ RESULTS_DIR = f'{NEURAL_CONTROLLERS_DIR}/results'
 from utils import load_model
 from multiclass_halu_eval_wild import get_multiclass_halu_eval_wild_data, TYPES
 
-import json
 import torch
 import pickle
 from tqdm import tqdm
 import random
 from openai import OpenAI
+from anthropic import Anthropic
 from abc import ABC, abstractmethod
 
 import direction_utils  
 random.seed(0)
 
-def read_json_to_list(file_path):
-    """
-    Reads a JSON file and returns its contents as a list of dictionaries.
-
-    Args:
-        file_path (str): Path to the JSON file.
-
-    Returns:
-        list: List of dictionaries loaded from the JSON file.
-    """
-    with open(file_path, 'r') as file:
-        data = json.load(file)
-    
-    if isinstance(data, list):
-        return data
-    else:
-        raise ValueError("JSON content is not a list.")
-
-
-
-
-
 class HallucinationJudge(ABC):
-    def __init__(self, judge_prompt):
-        self.judge_prompt = judge_prompt
+    def __init__(self):
+        pass
     
     @abstractmethod
     def get_judgement(self, prompt):
@@ -57,8 +35,7 @@ class HallucinationJudge(ABC):
         """Get predictions for all inputs at once."""
         predictions = []
         probabilities = []
-        for input_text in tqdm(inputs):
-            prompt = self.judge_prompt.format(query=input_text)
+        for prompt in tqdm(inputs):
             print("prompt:", prompt)
             
             judgement, probs = self.get_judgement(prompt)
@@ -90,8 +67,8 @@ class HallucinationJudge(ABC):
         return metrics
 
 class OpenAIJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, judge_model):
-        super().__init__(judge_prompt)
+    def __init__(self, judge_model):
+        super().__init__()
         self.judge_model = judge_model
         self.client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
     
@@ -143,9 +120,48 @@ class OpenAIJudge(HallucinationJudge):
                 
         return judgment, class_probs
 
+class AnthropicJudge(HallucinationJudge):
+    def __init__(self, judge_model):
+        super().__init__()
+        self.judge_model = judge_model
+        self.client = Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
+    
+    def get_judgement(self, prompt):
+        response = self.client.messages.create(
+            model=self.judge_model,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=5,
+            temperature=0
+        )
+        
+        # Get the response text
+        judgment = response.content[0].text.strip()
+        
+        # Initialize probabilities for each class
+        class_probs = [0.0] * len(TYPES)
+        
+        # Try to extract a class number from the response
+        try:
+            # Look for a digit between 1-6 in the first few characters
+            for char in judgment[:5]:
+                if char.isdigit() and '1' <= char <= '6':
+                    class_idx = int(char) - 1
+                    # Assign probability 1.0 to the detected class
+                    class_probs = [0.0] * len(TYPES)
+                    class_probs[class_idx] = 1.0
+                    return char, class_probs
+            
+            # Default to first class if no digit found
+            return "1", [1.0 if i == 0 else 0.0 for i in range(len(TYPES))]
+        except:
+            # Default to first class if parsing fails
+            return "1", [1.0 if i == 0 else 0.0 for i in range(len(TYPES))]
+
 class GemmaJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, judge_model):
-        super().__init__(judge_prompt)
+    def __init__(self, judge_model):
+        super().__init__()
         self.model, self.tokenizer = load_model(judge_model)
         
     def get_judgement(self, prompt):
@@ -199,8 +215,8 @@ class GemmaJudge(HallucinationJudge):
         return most_likely_class, class_probs
     
 class LlamaJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, judge_model):
-        super().__init__(judge_prompt)
+    def __init__(self, judge_model):
+        super().__init__()
         self.model, self.tokenizer = load_model(judge_model)
         
     def get_judgement(self, prompt):
@@ -251,16 +267,16 @@ class LlamaJudge(HallucinationJudge):
         
         return most_likely_class, class_probs
 
-def save_predictions(predictions, probabilities, judge_type, judge_model):
+def save_predictions(predictions, probabilities, judge_type, judge_model, prompt_version):
     """Save all predictions to a file."""
     os.makedirs(f'{RESULTS_DIR}/halu_eval_wild_results', exist_ok=True)
-    out_name = f'{RESULTS_DIR}/halu_eval_wild_results/multiclass_{judge_type}_{judge_model}_all_predictions.pkl'
+    out_name = f'{RESULTS_DIR}/halu_eval_wild_results/multiclass_{judge_type}_{judge_model}_prompt_{prompt_version}_all_predictions.pkl'
     with open(out_name, 'wb') as f:
         pickle.dump({'predictions': predictions, 'probabilities': probabilities}, f)
 
-def load_predictions(judge_type, judge_model):
+def load_predictions(judge_type, judge_model, prompt_version):
     """Load predictions from file if they exist."""
-    out_name = f'{RESULTS_DIR}/halu_eval_wild_results/multiclass_{judge_type}_{judge_model}_all_predictions.pkl'
+    out_name = f'{RESULTS_DIR}/halu_eval_wild_results/multiclass_{judge_type}_{judge_model}_prompt_{prompt_version}_all_predictions.pkl'
     if os.path.exists(out_name):
         with open(out_name, 'rb') as f:
             data = pickle.load(f)
@@ -269,11 +285,9 @@ def load_predictions(judge_type, judge_model):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--n_seeds', type=int, default=5)
-    parser.add_argument('--n_train', type=int, default=300)
-    parser.add_argument('--n_val', type=int, default=250)
-    parser.add_argument('--judge_type', type=str, default='llama', choices=['openai', 'llama', 'gemma'])
-    parser.add_argument('--judge_model', type=str, default='llama_3.3_70b_4bit_it', choices=['gpt-4o', 'llama_3.3_70b_4bit_it'])
+    parser.add_argument('--judge_type', type=str, default='llama') #choices=['openai', 'llama', 'gemma', 'anthropic']
+    parser.add_argument('--judge_model', type=str, default='llama_3.3_70b_4bit_it') #choices=['gpt-4o', 'llama_3.3_70b_4bit_it', 'claude-3-5-sonnet-20241022']
+    parser.add_argument('--prompt_version', type=str, default='v1')
     args = parser.parse_args()
     
     for n_, v_ in args.__dict__.items():
@@ -281,52 +295,33 @@ def main():
 
     inputs, labels = get_multiclass_halu_eval_wild_data()
 
-    splits_dir = f'{RESULTS_DIR}/halu_eval_wild_results'
-    os.makedirs(splits_dir, exist_ok=True)
-    out_name = f'{splits_dir}/splits_ntrain_{args.n_train}_nval_{args.n_val}_ntotal_600_nseeds_{args.n_seeds}.pkl'
-    with open(out_name, 'rb') as f:
-        splits = pickle.load(f)
-
     if args.judge_type == 'openai':
         judge = OpenAIJudge(args.judge_model)
     elif args.judge_type == 'llama':
         judge = LlamaJudge(args.judge_model)
     elif args.judge_type == 'gemma':
         judge = GemmaJudge(args.judge_model)
+    elif args.judge_type == 'anthropic':
+        judge = AnthropicJudge(args.judge_model)
  
-    
     # Try to load predictions or generate new ones
-    all_predictions, all_probabilities = load_predictions(args.judge_type, args.judge_model)
+    all_predictions, all_probabilities = load_predictions(args.judge_type, args.judge_model, args.prompt_version)
     if all_predictions is None:
         all_predictions, all_probabilities = judge.get_all_predictions(inputs)
-        save_predictions(all_predictions, all_probabilities, args.judge_type, args.judge_model)
-    
-    # Collect metrics across all seeds
-    all_seed_metrics = []
-    
-    # Evaluate each seed using the pre-computed predictions
-    for seed in tqdm(range(args.n_seeds)):
-        split = splits[seed]
-        metrics = judge.evaluate_split(all_predictions, all_probabilities, labels, split['test_indices'])
-        
-        print(f"Seed {seed} metrics:")
-        for metric_name, value in metrics.items():
-            print(f"{metric_name}: {value:.4f}")
+        save_predictions(all_predictions, all_probabilities, args.judge_type, args.judge_model, args.prompt_version)
 
-        out_dir = f'{RESULTS_DIR}/halu_eval_wild_results'
-        os.makedirs(out_dir, exist_ok=True)
-        out_name = f'{out_dir}/multiclass_{args.judge_type}_{args.judge_model}_seed_{seed}_metrics.pkl'
-        with open(out_name, 'wb') as f:
-            pickle.dump(metrics, f)
-            
-        all_seed_metrics.append(metrics)
-        
-    # Calculate and print average metrics across all seeds
-    print("\nAverage metrics across all seeds:")
-    avg_metrics = {}
-    for metric_name in all_seed_metrics[0].keys():
-        avg_metrics[metric_name] = sum(seed_metric[metric_name] for seed_metric in all_seed_metrics) / len(all_seed_metrics)
-        print(f"{metric_name}: {avg_metrics[metric_name]:.4f}")
+    # Evaluate metrics on the whole dataset
+    metrics = direction_utils.compute_prediction_metrics(all_probabilities, labels)
+    print("\nMetrics on the whole dataset:")
+    for metric_name, value in metrics.items():
+        print(f"{metric_name}: {value:.4f}")
+
+    # Optionally, save metrics
+    out_dir = f'{RESULTS_DIR}/halu_eval_wild_results'
+    os.makedirs(out_dir, exist_ok=True)
+    out_name = f'{out_dir}/halu_eval_wild-{args.judge_type}-{args.judge_model}-prompt_{args.prompt_version}-metrics.pkl'
+    with open(out_name, 'wb') as f:
+        pickle.dump(metrics, f)
 
 if __name__ == '__main__':
     main()

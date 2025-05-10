@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import sys
 sys.path.insert(0, '/u/dbeaglehole/xrfm')
 
-from xrfm import xRFM
+from xrfm import xRFM, RFM
 from sklearn.linear_model import LogisticRegression
 
 from sklearn.model_selection import train_test_split
@@ -470,7 +470,7 @@ def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y,
         }
     
     best_model = None
-    maximize_metric = (tuning_metric in ['f1', 'auc', 'acc'])
+    maximize_metric = (tuning_metric in ['f1', 'auc', 'acc', 'top_agop_vectors_ols_auc'])
     best_score = float('-inf') if maximize_metric else float('inf')
     for reg in search_space['regs']:
         for bw in search_space['bws']:
@@ -480,19 +480,40 @@ def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y,
                         'model': {
                             'kernel': 'l2_high_dim',
                             'bandwidth': bw,
+                            'tuning_metric': 'top_agop_vectors_ols_auc',
                         },
                         'fit': {
                             'reg': reg,
                             'iters': hyperparams['rfm_iters'],
-                            'center_grads': center_grads
+                            'center_grads': center_grads,
+                            'early_stop_rfm': True,
+                            'get_agop_best_model': True,
+                            'top_k': hyperparams['n_components']
                         }
                     }
-                    model = xRFM(rfm_params, device='cuda', tuning_metric=tuning_metric)
-                    model.fit(train_X, train_y, val_X, val_y)
+                    model = RFM(**rfm_params['model'], device='cuda')
+                    model.fit((train_X, train_y), 
+                              (val_X, val_y), 
+                              **rfm_params['fit']
+                            )
 
-                    pred_proba = model.predict_proba(val_X)
+                    if tuning_metric == 'top_agop_vectors_ols_auc':
+                        top_k = hyperparams['n_components']
+                        targets = val_y
 
-                    val_score = compute_prediction_metrics(pred_proba, val_y)[tuning_metric]
+                        _, U = torch.lobpcg(model.agop_best_model, k=top_k)
+                        top_eigenvectors = U[:, :top_k]
+                        projections = val_X @ top_eigenvectors
+                        projections = projections.reshape(-1, top_k)
+                        
+                        XtX = projections.T @ projections
+                        Xty = projections.T @ targets
+                        betas = torch.linalg.pinv(XtX) @ Xty
+                        preds = torch.sigmoid(projections @ betas).reshape(targets.shape)
+                        val_score = roc_auc_score(targets.cpu().numpy(), preds.cpu().numpy())
+                    else:
+                        pred_proba = model.predict_proba(val_X)
+                        val_score = compute_prediction_metrics(pred_proba, val_y)[tuning_metric]
 
                     if maximize_metric and val_score > best_score or not maximize_metric and val_score < best_score:
                         best_score = val_score

@@ -15,3 +15,5 @@ figures/*
 */*.out
 */v1
 */*/v1
+results_*
+old_results

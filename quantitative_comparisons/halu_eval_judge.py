@@ -16,16 +16,16 @@ import pickle
 from direction_utils import compute_prediction_metrics
 from tqdm import tqdm
 from openai import OpenAI
+from anthropic import Anthropic
 from tenacity import retry, stop_after_attempt, wait_exponential
 from abc import ABC, abstractmethod
 from utils import load_model
 from sklearn.metrics import roc_auc_score
-import json
-
+from halu_eval import get_halu_eval_data
 
 class HallucinationJudge(ABC):
-    def __init__(self, judge_prompt):
-        self.judge_prompt = judge_prompt
+    def __init__(self):
+        pass
     
     @abstractmethod
     def get_judgement(self, prompt):
@@ -43,50 +43,30 @@ class HallucinationJudge(ABC):
         
         return torch.tensor(predictions), torch.tensor(probabilities)
     
-    def evaluate_split(self, all_predictions, all_probabilities, all_labels, test_indices):
-        """Evaluate metrics for a specific split using pre-computed predictions."""
-        split_probabilities = all_probabilities[test_indices]
-        split_labels = torch.tensor([all_labels[i] for i in test_indices])
-        
-        split_probabilities = torch.tensor(split_probabilities).reshape(-1, 1)
-        split_labels = torch.tensor(split_labels).reshape(-1, 1)
-        metrics = compute_prediction_metrics(split_probabilities, split_labels)
-        
-        # Calculate AUC
-        auc = roc_auc_score(split_labels.numpy(), split_probabilities.numpy())
-        metrics['auc'] = auc
-        
-        return metrics
-        
-    def evaluate_inputs(self, test_inputs, test_labels, splits):
+    def evaluate_inputs(self, inputs, labels, prompt_version):
         # First try to load precomputed predictions
         judge_type = self.__class__.__name__.replace('Judge', '').lower()
         judge_model = getattr(self, 'judge_model', None)
         
-        all_predictions, all_probabilities = load_predictions(judge_type, judge_model)
+        predictions, probabilities = load_predictions(judge_type, judge_model, prompt_version)
         
-        if all_predictions is None:
+        if predictions is None:
             # Get all judgements at once for efficiency
-            all_predictions, all_probabilities = self.get_all_predictions(test_inputs)
-            save_predictions(all_predictions, all_probabilities, judge_type, judge_model)
+            predictions, probabilities = self.get_all_predictions(inputs)
+            save_predictions(predictions, probabilities, judge_type, judge_model, prompt_version)
         
-        results = []
-        for seed in range(len(splits)):
-            split = splits[seed]
-            
-            # Evaluate using the pre-computed predictions
-            test_metrics = self.evaluate_split(all_predictions, all_probabilities, test_labels, split['test_indices'])
-            
-            results.append({
-                'seed': seed,
-                'test_metrics': test_metrics,
-            })
-            
-        return results
+        # Evaluate metrics for the whole dataset
+        labels = torch.tensor(labels)
+        metrics = compute_prediction_metrics(probabilities, labels)
+
+        # Calculate AUC
+        auc = roc_auc_score(labels.cpu().numpy(), probabilities.cpu().numpy())
+        metrics['auc'] = auc
+        return metrics
 
 class OpenAIJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, judge_model):
-        super().__init__(judge_prompt)
+    def __init__(self, judge_model):
+        super().__init__()
         self.judge_model = judge_model
         self.client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
     
@@ -95,7 +75,7 @@ class OpenAIJudge(HallucinationJudge):
         wait=wait_exponential(min=1, max=1024),
     )
     def get_judgement(self, prompt):
-        full_prompt = self.judge_prompt.format(statement=prompt)
+        full_prompt = f"{prompt}"
         response = self.client.chat.completions.create(
             model=self.judge_model,
             messages=[
@@ -145,14 +125,77 @@ class OpenAIJudge(HallucinationJudge):
             is_no = 'n' in response.choices[0].message.content.lower()
             return (is_no, is_no)
 
+class AnthropicJudge(HallucinationJudge):
+    def __init__(self, judge_model):
+        super().__init__()
+        self.judge_model = judge_model
+        self.client = Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
+    
+    @retry(
+        stop=stop_after_attempt(12),
+        wait=wait_exponential(min=1, max=1024),
+    )
+    def get_judgement(self, prompt):
+        full_prompt = f"{prompt}"
+        response = self.client.messages.create(
+            model=self.judge_model,
+            messages=[
+                {"role": "user", "content": full_prompt}
+            ],
+            max_tokens=5,
+            temperature=0,
+            logprobs=True,
+            top_logprobs=20
+        )
+        
+        # Extract logprobs from the response
+        logprobs = response.content[0].logprobs[0].tokens[0].top_logprobs
+        yes_prob = None
+        no_prob = None
+        
+        # Find logprobs for Yes/No tokens
+        for token_logprob in logprobs:
+            token = token_logprob.token
+            if token == 'Yes':
+                yes_prob = token_logprob.logprob
+            elif token == 'No':
+                no_prob = token_logprob.logprob
+        
+        # If we didn't find exact "Yes"/"No", look for close matches
+        if yes_prob is None or no_prob is None:
+            for token_logprob in logprobs:
+                token = token_logprob.token
+                if yes_prob is None and ('yes' in token.lower() or 'y' == token.lower()):
+                    yes_prob = token_logprob.logprob
+                elif no_prob is None and ('no' in token.lower() or 'n' == token.lower()):
+                    no_prob = token_logprob.logprob
+        
+        if yes_prob is not None and no_prob is not None:
+            # Convert from log probabilities to probabilities
+            yes_prob_value = torch.exp(torch.tensor(yes_prob)).item()
+            no_prob_value = torch.exp(torch.tensor(no_prob)).item()
+            # Normalize probabilities
+            total = yes_prob_value + no_prob_value
+            no_prob_norm = no_prob_value / total if total > 0 else 0.5
+            return (no_prob > yes_prob, no_prob_norm)
+        elif yes_prob is not None:
+            return (0, 0.0)  # No hallucination
+        elif no_prob is not None:
+            return (1, 1.0)  # Hallucination
+        else:
+            # Fallback to content
+            content = response.content[0].text.lower()
+            is_no = 'n' in content
+            return (is_no, float(is_no))
+
 class LlamaJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, judge_model=None):
-        super().__init__(judge_prompt)
+    def __init__(self, judge_model=None):
+        super().__init__()
         self.judge_model = judge_model
         self.model, self.tokenizer = load_model(self.judge_model)
         
     def get_judgement(self, prompt):
-        full_prompt = self.judge_prompt.format(statement=prompt)
+        full_prompt = f"{prompt}"
         chat = [
             {'role':'system', 'content':'You are a helpful assistant who follows instructions exactly.'},
             {'role':'user', 'content':full_prompt}
@@ -197,13 +240,13 @@ class LlamaJudge(HallucinationJudge):
             return (no_prob > yes_prob, no_prob_norm)
 
 class GemmaJudge(HallucinationJudge):
-    def __init__(self, judge_prompt, judge_model=None):
-        super().__init__(judge_prompt)
+    def __init__(self, judge_model=None):
+        super().__init__()
         self.judge_model = judge_model
         self.model, self.tokenizer = load_model(self.judge_model)
         
     def get_judgement(self, prompt):
-        full_prompt = self.judge_prompt.format(statement=prompt)
+        full_prompt = f"{prompt}"
         chat = [
             {'role':'user', 'content':full_prompt}
         ]
@@ -246,16 +289,16 @@ class GemmaJudge(HallucinationJudge):
             # Make the decision based on these probabilities
             return (no_prob > yes_prob, no_prob_norm)
 
-def save_predictions(predictions, probabilities, judge_type, judge_model):
+def save_predictions(predictions, probabilities, judge_type, judge_model, prompt_version):
     """Save all predictions to a file."""
     os.makedirs(f'{RESULTS_DIR}/halu_eval_results', exist_ok=True)
-    out_name = f'{RESULTS_DIR}/halu_eval_results/{judge_type}_{judge_model}_all_predictions.pkl'
+    out_name = f'{RESULTS_DIR}/halu_eval_results/{judge_type}_{judge_model}_prompt_{prompt_version}_all_predictions.pkl'
     with open(out_name, 'wb') as f:
         pickle.dump({'predictions': predictions, 'probabilities': probabilities}, f)
 
-def load_predictions(judge_type, judge_model):
+def load_predictions(judge_type, judge_model, prompt_version):
     """Load predictions from file if they exist."""
-    out_name = f'{RESULTS_DIR}/halu_eval_results/{judge_type}_{judge_model}_all_predictions.pkl'
+    out_name = f'{RESULTS_DIR}/halu_eval_results/{judge_type}_{judge_model}_prompt_{prompt_version}_all_predictions.pkl'
     if os.path.exists(out_name):
         with open(out_name, 'rb') as f:
             data = pickle.load(f)
@@ -264,16 +307,16 @@ def load_predictions(judge_type, judge_model):
     
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--n_seeds', type=int, default=5)
-    parser.add_argument('--hal_type', type=str, default='qa')
-    parser.add_argument('--judge_type', type=str, default='llama', choices=['openai', 'llama', 'gemma'])
-    parser.add_argument('--judge_model', type=str, default='llama_3.3_70b_4bit_it', choices=['gpt-4o', 'llama_3.3_70b_4bit_it'])
+    parser.add_argument('--hal_type', type=str, default='general')
+    parser.add_argument('--judge_type', type=str, default='llama') #, choices=['openai', 'llama', 'gemma', 'anthropic']
+    parser.add_argument('--judge_model', type=str, default='llama_3.3_70b_4bit_it') # choices=['gpt-4o', 'llama_3.3_70b_4bit_it', 'claude-3-opus-20240229']
+    parser.add_argument('--prompt_version', type=str, default='v1')
     args = parser.parse_args()
     
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")
     
-    inputs, labels = get_judge_halu_eval_data(args.hal_type)
+    inputs, labels = get_halu_eval_data(args.hal_type, args.prompt_version)
 
     print("="*100)
     print(inputs[0])
@@ -281,41 +324,29 @@ def main():
     print(labels[0])
     print("="*100)
     
-    # Get the same splits as used in the original code
-    if args.hal_type == 'qa':
-        out_name = f'{RESULTS_DIR}/halu_eval_results/qa_test_splits_nval_5000_ntotal_10000_nseeds_{args.n_seeds}.pkl'
-    else:
-        out_name = f'{RESULTS_DIR}/halu_eval_results/general_test_splits_nval_2253_ntotal_4507_nseeds_{args.n_seeds}.pkl'
-    
     os.makedirs(f'{RESULTS_DIR}/halu_eval_results', exist_ok=True)
-    with open(out_name, 'rb') as f:
-        splits = pickle.load(f)
-    
-    judge_prompt = '{statement}'
+
     if args.judge_type == 'openai':
-        judge = OpenAIJudge(judge_prompt, args.judge_model)
+        judge = OpenAIJudge(args.judge_model)
     elif args.judge_type == 'llama':
-        judge = LlamaJudge(judge_prompt, args.judge_model)
+        judge = LlamaJudge(args.judge_model)
     elif args.judge_type == 'gemma':
-        judge = GemmaJudge(judge_prompt, args.judge_model)
+        judge = GemmaJudge(args.judge_model)
+    elif args.judge_type == 'anthropic':
+        judge = AnthropicJudge(args.judge_model)
     
-    # Evaluate and get results for all seeds
-    results = judge.evaluate_inputs(inputs, labels, splits)
+    # Evaluate and get results for the dataset
+    metrics = judge.evaluate_inputs(inputs, labels, args.prompt_version)
     
-    # Print average metrics across seeds
-    print("\nAverage metrics across all seeds:")
-    avg_metrics = {}
-    for metric_name in results[0]['test_metrics'].keys():
-        avg_metrics[metric_name] = sum(result['test_metrics'][metric_name] for result in results) / len(results)
-        print(f"{metric_name}: {avg_metrics[metric_name]:.4f}")
+    # Print metrics for the dataset
+    print("\nMetrics for the dataset:")
+    for metric_name, value in metrics.items():
+        print(f"{metric_name}: {value:.4f}")
     
-    # Save results for each seed
-    for result in results:
-        seed = result['seed']
-        test_metrics = result['test_metrics']
-        test_out_name = f'{RESULTS_DIR}/halu_eval_results/{args.judge_type}_{args.judge_model}_{args.hal_type}_seed_{seed}_metrics.pkl'
-        with open(test_out_name, 'wb') as f:
-            pickle.dump(test_metrics, f)
+    # Save results for the dataset
+    test_out_name = f'{RESULTS_DIR}/halu_eval_results/halu_eval_{args.hal_type}-{args.judge_type}-{args.judge_model}-prompt_{args.prompt_version}-metrics.pkl'
+    with open(test_out_name, 'wb') as f:
+        pickle.dump(metrics, f)
 
 if __name__ == '__main__':
     main()

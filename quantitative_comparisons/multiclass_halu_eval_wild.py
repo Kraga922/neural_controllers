@@ -61,6 +61,8 @@ def get_multiclass_halu_eval_wild_data(prompt_version='v1'):
         template += "Based on the above definitions, which single category does the following query fall into? Respond just with a number between 1 and 6. "
         template += "For example, your response would be just 'N.' if the query belongs to category N.\n\n"
         template += "Query: {query}"
+    elif prompt_version == 'empty':
+        template = "{query}"
 
     inputs = []
     ohe_labels = []
@@ -125,12 +127,13 @@ def split_states_on_idx(inputs, split):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--control_method', type=str, default='logistic')
+    parser.add_argument('--control_method', type=str, default='rfm')
     parser.add_argument('--model_name', type=str, default='llama_3.3_70b_4bit_it', choices=['llama_3_8b_it', 'llama_3.3_70b_4bit_it'])
-    parser.add_argument('--k_folds', type=int, default=10)
+    parser.add_argument('--k_folds', type=int, default=5)
     parser.add_argument('--n_components', type=int, default=6)
     parser.add_argument('--rfm_iters', type=int, default=10)
-    parser.add_argument('--prompt_version', type=str, default='v1')
+    parser.add_argument('--prompt_version', type=str, default='empty')
+    parser.add_argument('--tuning_metric', type=str, default='top_agop_vectors_ols_auc')
     args = parser.parse_args()
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")  
@@ -140,6 +143,11 @@ def main():
     n_components = args.n_components
     prompt_version = args.prompt_version
     k_folds = args.k_folds
+    tuning_metric = args.tuning_metric
+
+    if control_method not in ['rfm']:
+        n_components = 6
+        tuning_metric = 'auc'
 
     language_model, tokenizer = load_model(model=model_name)
     controller = NeuralController(
@@ -148,7 +156,7 @@ def main():
         control_method=control_method,
         rfm_iters=args.rfm_iters,
         batch_size=2,
-        n_components=8
+        n_components=n_components
     )  
 
     unformatted_inputs, labels = get_multiclass_halu_eval_wild_data(prompt_version)
@@ -161,6 +169,10 @@ def main():
             },
         ]
         inputs.append(tokenizer.apply_chat_template(chat, tokenize=False))
+
+    print("="*100)
+    print(inputs[0])
+    print("="*100)
 
 
     # Precompute and cache hidden states
@@ -204,11 +216,14 @@ def main():
         test_labels = labels[test_indices]
 
         try:
-            controller.load(concept=f'halu_eval_wild_multiclass_fold_{fold}_prompt_{prompt_version}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            print("Loading controller")
+            controller.load(concept=f'halu_eval_wild_multiclass_fold_{fold}_prompt_{prompt_version}_tuning_metric_{tuning_metric}_top_k_{n_components}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
-            controller.compute_directions(train_hidden_states, train_labels, val_hidden_states, val_labels)
-            controller.save(concept=f'halu_eval_wild_multiclass_fold_{fold}_prompt_{prompt_version}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            print("Loading failed, computing directions")
+            controller.compute_directions(train_hidden_states, train_labels, val_hidden_states, val_labels, tuning_metric=tuning_metric)
+            controller.save(concept=f'halu_eval_wild_multiclass_fold_{fold}_prompt_{prompt_version}_tuning_metric_{tuning_metric}_top_k_{n_components}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
 
+        print("Evaluating directions")
         _, _, _, test_predictions = controller.evaluate_directions(
             train_hidden_states, train_labels,
             val_hidden_states, val_labels,
@@ -236,16 +251,16 @@ def main():
     aggregated_metrics = compute_prediction_metrics(aggregated_preds_sorted, labels)
     best_layer_metrics = compute_prediction_metrics(best_layer_preds_sorted, labels)
 
-    agg_metrics_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_kfold_aggregated_metrics.pkl'
+    agg_metrics_file = f'{results_dir}/halu_eval_wild-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-aggregated_metrics.pkl'
     with open(agg_metrics_file, 'wb') as f:
         pickle.dump(aggregated_metrics, f)
 
-    best_layer_metrics_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_kfold_best_layer_metrics.pkl'
+    best_layer_metrics_file = f'{results_dir}/halu_eval_wild-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-best_layer_metrics.pkl'
     with open(best_layer_metrics_file, 'wb') as f:
         pickle.dump(best_layer_metrics, f)
 
     # Save predictions
-    predictions_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_predictions.pkl'
+    predictions_file = f'{results_dir}/halu_eval_wild-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-predictions.pkl'
     with open(predictions_file, 'wb') as f:
         pickle.dump({
             'aggregation': aggregated_preds_sorted,

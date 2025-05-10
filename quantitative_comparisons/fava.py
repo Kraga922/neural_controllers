@@ -20,8 +20,38 @@ from sklearn.model_selection import train_test_split
 from bs4 import BeautifulSoup
 
 NEURAL_CONTROLLERS_DIR = os.environ['NEURAL_CONTROLLERS_DIR']
-
 _TAGS = ["entity", "relation", "sentence", "invented", "subjective", "unverifiable"]
+TEMPLATES = {
+    'empty' : "{statement}",
+    'v1' : ("Consider hallucinations of the following types:\n"
+            "(1a) Entity : Contradictory entity errors are a sub-category within Type 1, "
+            "where an entity in a statement is incorrect and changing that single entity "
+            "can make the entire sentence factually correct.\n"
+            
+            "(1b) Relation : Contradictory relation errors are another sub-category within "
+            "contradictory statements where a semantic relationship (e.g., verbs, prepositions, "
+            "or adjectives) in a statement is incorrect.\n"
+            
+            "(1c) Sentence : Contradictory sentence errors refer to cases where a full statement "
+            "entirely contradicts relevant evidence from the web, and cannot be solved via "
+            "phrase-level edits.\n"
+            
+            "(2) Invented : Invented errors refer to statements where the LM generates an entirely "
+            "fabricated entity that doesn't exist based on world knowledge. Fictional entities in "
+            "creative work aren't included.\n"
+            
+            "(3) Subjective : Subjective errors refer to expressions about existing entities that "
+            "lack universal validity. These statements often do not contain facts and are influenced "
+            "by personal beliefs or opinions.\n"
+            
+            "(4) Unverifiable : These are statements where the LM output contains facts, but no "
+            "retrieved.\n\n"
+
+            'Based on the above definition, does the following statement contain a hallucination? '
+            'State yes or no.\n\nStatement: {statement}'
+        )
+}
+
 def remove_deleted_text(text):
     # Use regex to match text between <delete> and </delete> tags
     regex = r'<delete>.*?</delete>'
@@ -67,38 +97,7 @@ def get_fava_annotated_data(prompt_version='v1'):
     with open(file_path, 'r') as file:
         data = json.load(file)
 
-
-    if prompt_version=='v1':
-        template = "Consider hallucinations of the following types:\n"
-        template += (
-            "(1a) Entity : Contradictory entity errors are a sub-category within Type 1, "
-            "where an entity in a statement is incorrect and changing that single entity "
-            "can make the entire sentence factually correct.\n"
-            
-            "(1b) Relation : Contradictory relation errors are another sub-category within "
-            "contradictory statements where a semantic relationship (e.g., verbs, prepositions, "
-            "or adjectives) in a statement is incorrect.\n"
-            
-            "(1c) Sentence : Contradictory sentence errors refer to cases where a full statement "
-            "entirely contradicts relevant evidence from the web, and cannot be solved via "
-            "phrase-level edits.\n"
-            
-            "(2) Invented : Invented errors refer to statements where the LM generates an entirely "
-            "fabricated entity that doesn't exist based on world knowledge. Fictional entities in "
-            "creative work aren't included.\n"
-            
-            "(3) Subjective : Subjective errors refer to expressions about existing entities that "
-            "lack universal validity. These statements often do not contain facts and are influenced "
-            "by personal beliefs or opinions.\n"
-            
-            "(4) Unverifiable : These are statements where the LM output contains facts, but no "
-            "retrieved.\n\n"
-        )
-        template += (
-            'Based on the above definition, does the following statement contain a hallucination? '
-            'State yes or no.\nStatement: {statement}'
-        )
-
+    template = TEMPLATES[prompt_version]
     inputs = []
     labels = []
     for d in data:
@@ -108,7 +107,7 @@ def get_fava_annotated_data(prompt_version='v1'):
         labels.append(label)
     return inputs, labels
 
-def get_fava_training_data(tokenizer, unsupervised=False, max_n=10000):
+def get_fava_training_data(tokenizer, max_n=10000, prompt_version='v1'):
     # Load training data from FAVA dataset
     from datasets import load_dataset
     ds = load_dataset("fava-uw/fava-data")
@@ -133,32 +132,16 @@ def get_fava_training_data(tokenizer, unsupervised=False, max_n=10000):
         with open(shuffle_indices_path, 'wb') as f:
             pickle.dump(indices, f)
 
+    template = TEMPLATES[prompt_version]
     inputs = []
     labels = []
     for d in completions:
         i, label = modify(d)
-        chat = [{'role':'user','content':i}]
+        chat = [{'role':'user','content':template.format(statement=i)}]
         inputs.append(tokenizer.apply_chat_template(chat, tokenize=False))
         labels.append(label)
-
-    if unsupervised:
-        # Split data and create pairs for training
-        pos_train = [x for x, y in zip(inputs, labels) if y == 1]
-        neg_train = [x for x, y in zip(inputs, labels) if y == 0]
-        train_inputs, train_labels = create_paired_data(pos_train, neg_train)
-
-        print("Number of positive examples:", len(pos_train))
-        print("Number of negative examples:", len(neg_train))
-        print("Shape of train_inputs after create_paired_data:", np.array(train_inputs).shape)
-
-        # Flatten training data
-        train_inputs = np.concatenate(train_inputs).tolist()
-        train_labels = np.concatenate(train_labels).tolist()
-    else:
-        train_inputs = inputs
-        train_labels = labels
     
-    return train_inputs[:max_n], train_labels[:max_n]
+    return inputs[:max_n], labels[:max_n]
 
 def get_splits(k_folds, n_total):
     """
@@ -200,7 +183,8 @@ def main():
     parser.add_argument('--model_name', type=str, default='llama_3.3_70b_4bit_it')
     parser.add_argument('--n_folds', type=int, default=5)
     parser.add_argument('--n_components', type=int, default=3)
-    parser.add_argument('--prompt_version', type=str, default='v1')
+    parser.add_argument('--prompt_version', type=str, default='empty')
+    parser.add_argument('--tuning_metric', type=str, default='top_agop_vectors_ols_auc')
     args = parser.parse_args()
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")
@@ -210,25 +194,37 @@ def main():
     n_folds = args.n_folds
     n_components = args.n_components
     prompt_version = args.prompt_version
+    tuning_metric = args.tuning_metric
 
     if control_method not in ['rfm']:
-        n_components = 1                        
+        n_components = 1
+        tuning_metric = 'auc'                        
         
     print("Num components:", n_components)
+    print("Tuning metric:", tuning_metric)
                         
     language_model, tokenizer = load_model(model=model_name)
     # Get annotated data for val/test
-    inputs, labels = get_fava_annotated_data(prompt_version)
+    unformatted_inputs, labels = get_fava_annotated_data(prompt_version)
+    inputs = []
+    for unformatted_input in unformatted_inputs:
+        chat = [{'role':'user','content':unformatted_input}]
+        inputs.append(tokenizer.apply_chat_template(chat, tokenize=False))
+
+    print("="*100)
+    print(inputs[0])
+    print("="*100)
 
     controller = NeuralController(
         language_model,
         tokenizer,
         control_method=control_method,
         batch_size=1,
-        rfm_iters=5
+        rfm_iters=5,
+        n_components=n_components,
     )
     hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
-                                      f'fava_annotated_{model_name}_train.pth')
+                                      f'fava_annotated_{model_name}_prompt_{prompt_version}.pth')
     if os.path.exists(hidden_states_path):
         with open(hidden_states_path, 'rb') as f:
             hidden_states = pickle.load(f)
@@ -265,22 +261,22 @@ def main():
         os.makedirs(results_dir, exist_ok=True)
         
         try:
-            controller.load(concept='fava_training', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.load(concept=f'fava_training_prompt_{prompt_version}_fold_{fold}_tuning_metric_{tuning_metric}_top_k_{n_components}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
         except:
             # Create new controller and compute directions using the fixed training set
             controller = NeuralController(
                 language_model,
                 tokenizer,
-                n_components=5,
                 control_method=control_method,
                 batch_size=2,
-                rfm_iters=5
+                rfm_iters=5,
+                n_components=n_components
             )
 
-            train_inputs, train_labels = get_fava_training_data(tokenizer)
+            train_inputs, train_labels = get_fava_training_data(tokenizer, prompt_version=prompt_version)
 
             train_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
-                                      f'fava_training_{model_name}.pth')
+                                      f'fava_training_{model_name}_prompt_{prompt_version}.pth')
             if os.path.exists(train_hidden_states_path):
                 with open(train_hidden_states_path, 'rb') as f:
                     train_hidden_states = pickle.load(f)
@@ -293,8 +289,10 @@ def main():
                 with open(train_hidden_states_path, 'wb') as f:
                     pickle.dump(train_hidden_states, f)
 
-            controller.compute_directions(train_hidden_states, train_labels)
-            controller.save(concept='fava_training', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
+            controller.compute_directions(train_hidden_states, train_labels, 
+                                          val_hidden_states, val_labels,
+                                          tuning_metric=tuning_metric)
+            controller.save(concept=f'fava_training_prompt_{prompt_version}_fold_{fold}_tuning_metric_{tuning_metric}_top_k_{n_components}', model_name=model_name, path=f'{NEURAL_CONTROLLERS_DIR}/directions/')
               
 
         # Split val set into train and sub-val sets
@@ -313,7 +311,7 @@ def main():
             val_sub_hidden_states, val_sub_labels,
             test_hidden_states, test_labels,
             n_components=n_components,
-            agg_model=control_method
+            agg_model=control_method,
         )
 
         all_aggregated_predictions.append(test_predictions['aggregation'])
@@ -331,19 +329,20 @@ def main():
 
     # Compute and save AUC score
     from direction_utils import compute_prediction_metrics
+    labels = torch.tensor(labels)
     agg_metrics = compute_prediction_metrics(all_aggregated_predictions, labels)
     best_layer_metrics = compute_prediction_metrics(all_best_layer_predictions, labels)
 
-    agg_metrics_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_aggregated_metrics.pkl'
+    agg_metrics_file = f'{results_dir}/fava-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-aggregated_metrics.pkl'
     with open(agg_metrics_file, 'wb') as f:
         pickle.dump(agg_metrics, f)
 
-    best_layer_metrics_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_best_layer_metrics.pkl'
+    best_layer_metrics_file = f'{results_dir}/fava-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-best_layer_metrics.pkl'
     with open(best_layer_metrics_file, 'wb') as f:
         pickle.dump(best_layer_metrics, f)
 
     # Save predictions
-    predictions_file = f'{results_dir}/{model_name}_{control_method}_prompt_{prompt_version}_predictions.pkl'
+    predictions_file = f'{results_dir}/fava-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-predictions.pkl'
     with open(predictions_file, 'wb') as f:
         pickle.dump({
             'aggregation': all_aggregated_predictions.cpu(),

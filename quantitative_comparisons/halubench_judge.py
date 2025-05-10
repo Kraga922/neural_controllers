@@ -8,14 +8,13 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from utils import load_model
 
-import numpy as np
 import pickle
 from tqdm import tqdm
-from datasets import load_dataset
 from sklearn.metrics import roc_auc_score, f1_score
 import torch
 from abc import ABC, abstractmethod
 from openai import OpenAI
+from anthropic import Anthropic
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from halubench import get_halubench_data
@@ -41,16 +40,16 @@ def compute_metrics(predictions, labels, threshold=0.5):
     
     return metrics
 
-def save_predictions(predictions, probabilities, judge_type, judge_model, source_ds):
+def save_predictions(predictions, probabilities, judge_type, judge_model, source_ds, prompt_version):
     """Save all predictions to a file."""
     os.makedirs(f'{RESULTS_DIR}/halubench_results/{source_ds}', exist_ok=True)
-    out_name = f'{RESULTS_DIR}/halubench_results/{source_ds}/{judge_type}_{judge_model}_all_predictions.pkl'
+    out_name = f'{RESULTS_DIR}/halubench_results/{source_ds}/{judge_type}_{judge_model}_prompt_{prompt_version}_all_predictions.pkl'
     with open(out_name, 'wb') as f:
         pickle.dump({'predictions': predictions, 'probabilities': probabilities}, f)
 
-def load_predictions(judge_type, judge_model, source_ds):
+def load_predictions(judge_type, judge_model, source_ds, prompt_version):
     """Load predictions from file if they exist."""
-    out_name = f'{RESULTS_DIR}/halubench_results/{source_ds}/{judge_type}_{judge_model}_all_predictions.pkl'
+    out_name = f'{RESULTS_DIR}/halubench_results/{source_ds}/{judge_type}_{judge_model}_prompt_{prompt_version}_all_predictions.pkl'
     if os.path.exists(out_name):
         with open(out_name, 'rb') as f:
             data = pickle.load(f)
@@ -79,17 +78,17 @@ class HaluBenchJudge(ABC):
         
         return torch.tensor(predictions), torch.tensor(probabilities)
             
-    def evaluate_inputs(self, source_ds):
+    def evaluate_inputs(self, source_ds, prompt_version):
         self.source_ds = source_ds
         
         # First try to load precomputed predictions
         judge_type = self.__class__.__name__.replace('HaluBenchJudge', '').lower()
         
-        all_predictions, all_probabilities = load_predictions(judge_type, self.judge_model, source_ds)
+        all_predictions, all_probabilities = load_predictions(judge_type, self.judge_model, source_ds, prompt_version)
         
         if all_predictions is None:
             # Load the dataset
-            inputs, labels = get_halubench_data(source_ds)
+            inputs, labels = get_halubench_data(source_ds, prompt_version=prompt_version)
 
             print("="*100)
             print(inputs[0])
@@ -99,7 +98,7 @@ class HaluBenchJudge(ABC):
             
             # Get all judgements at once for efficiency
             all_predictions, all_probabilities = self.get_all_predictions(inputs)
-            save_predictions(all_predictions, all_probabilities, judge_type, self.judge_model, source_ds)
+            save_predictions(all_predictions, all_probabilities, judge_type, self.judge_model, source_ds, prompt_version)
             
             # Calculate metrics
             metrics = compute_metrics(all_probabilities, labels)
@@ -220,11 +219,75 @@ class OpenAIHaluBenchJudge(HaluBenchJudge):
             is_no = 'n' in response.choices[0].message.content.lower()
             return (is_no, is_no)
 
+class AnthropicHaluBenchJudge(HaluBenchJudge):
+    def __init__(self, judge_model=None):
+        super().__init__(judge_model=judge_model)
+        self.client = Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
+        _, self.tokenizer = load_model('llama_3.3_70b_4bit_it')  # Just for tokenizing inputs
+    
+    @retry(
+        stop=stop_after_attempt(12),
+        wait=wait_exponential(min=1, max=1024),
+    )
+    def get_judgement(self, prompt):
+        full_prompt = self.judge_prompt.format(statement=prompt)
+        response = self.client.messages.create(
+            model=self.judge_model,
+            messages=[
+                {"role": "user", "content": full_prompt}
+            ],
+            max_tokens=5,
+            temperature=0,
+            logprobs=True,
+            top_logprobs=20
+        )
+        
+        # Extract logprobs from the response
+        logprobs = response.content[0].logprobs[0].tokens[0].top_logprobs
+        yes_prob = None
+        no_prob = None
+        
+        # Find logprobs for Yes/No tokens
+        for token_logprob in logprobs:
+            token = token_logprob.token
+            if token == 'Yes':
+                yes_prob = token_logprob.logprob
+            elif token == 'No':
+                no_prob = token_logprob.logprob
+        
+        # If we didn't find exact "Yes"/"No", look for close matches
+        if yes_prob is None or no_prob is None:
+            for token_logprob in logprobs:
+                token = token_logprob.token
+                if yes_prob is None and ('yes' in token.lower() or 'y' == token.lower()):
+                    yes_prob = token_logprob.logprob
+                elif no_prob is None and ('no' in token.lower() or 'n' == token.lower()):
+                    no_prob = token_logprob.logprob
+        
+        if yes_prob is not None and no_prob is not None:
+            # Convert from log probabilities to probabilities
+            yes_prob_value = torch.exp(torch.tensor(yes_prob)).item()
+            no_prob_value = torch.exp(torch.tensor(no_prob)).item()
+            # Normalize probabilities
+            total = yes_prob_value + no_prob_value
+            no_prob_norm = no_prob_value / total if total > 0 else 0.5
+            return (no_prob > yes_prob, no_prob_norm)
+        elif yes_prob is not None:
+            return (0, 0.0)  # Not a hallucination
+        elif no_prob is not None:
+            return (1, 1.0)  # Hallucination
+        else:
+            # Fallback to content
+            content = response.content[0].text.lower()
+            is_no = 'n' in content
+            return (is_no, float(is_no))
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source_ds', type=str, default='FinanceBench')
-    parser.add_argument('--judge_type', type=str, default='openai', choices=['openai', 'llama', 'gemma'])
+    parser.add_argument('--judge_type', type=str, default='openai') #, choices=['openai', 'llama', 'gemma', 'anthropic']
     parser.add_argument('--judge_model', type=str, default='gpt-4o') #llama_3.3_70b_4bit_it #gpt-4o
+    parser.add_argument('--prompt_version', type=str, default='v1')
     args = parser.parse_args()
     for n_, v_ in args.__dict__.items():
         print(f"{n_:<20} : {v_}")
@@ -232,19 +295,22 @@ def main():
     judge_model = args.judge_model
     source_ds = args.source_ds
     judge_type = args.judge_type
+    prompt_version = args.prompt_version
 
     if judge_type == 'llama':
         judge = LlamaHaluBenchJudge(judge_model=judge_model)
     elif judge_type == 'openai':
         judge = OpenAIHaluBenchJudge(judge_model=judge_model)
+    elif judge_type == 'anthropic':
+        judge = AnthropicHaluBenchJudge(judge_model=judge_model)
     else:
         raise ValueError(f"Invalid judge type: {judge_type}")
     
-    metrics, predictions = judge.evaluate_inputs(source_ds)
+    metrics, predictions = judge.evaluate_inputs(source_ds, prompt_version)
     # Save metrics to file
     results_dir = f'{RESULTS_DIR}/halubench_results/{source_ds}'
     os.makedirs(results_dir, exist_ok=True)
-    metrics_file = f'{results_dir}/{judge_type}_{judge_model}_metrics.pkl'
+    metrics_file = f'{results_dir}/{source_ds}-{judge_type}-{judge_model}-prompt_{prompt_version}-metrics.pkl'
     with open(metrics_file, 'wb') as f:
         pickle.dump(metrics, f)
     

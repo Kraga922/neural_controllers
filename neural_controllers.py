@@ -35,6 +35,8 @@ class NeuralController:
         self.control_method = control_method
         self.name = None
 
+        print(f"n_components: {n_components}")
+
         hparams = {
             'control_method' : control_method,
             'rfm_iters' : rfm_iters,
@@ -45,10 +47,7 @@ class NeuralController:
         }
         self.hyperparams = hparams
         
-        if 'concat' in control_method:
-            self.hidden_layers = ['concat']
-        else:
-            self.hidden_layers = list(range(-1, -model.config.num_hidden_layers, -1))
+        self.hidden_layers = list(range(-1, -model.config.num_hidden_layers, -1))
         self.toolkit = TOOLKITS[control_method]()
         self.signs = None
         self.detector_coefs = None

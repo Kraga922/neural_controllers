@@ -305,8 +305,8 @@ def load_predictions(judge_type, judge_model, prompt_version):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--judge_type', type=str, choices=['openai', 'llama', 'toxicchat', 'gemma'], default='toxicchat')
-    parser.add_argument('--judge_model', type=str, default=None, choices=['gpt-4o', 'llama_3.3_70b_4bit_it'])
+    parser.add_argument('--judge_type', type=str, default='toxicchat') # choices=['openai', 'llama', 'toxicchat', 'gemma'],
+    parser.add_argument('--judge_model', type=str, default=None) # , choices=['gpt-4o', 'llama_3.3_70b_4bit_it']
     parser.add_argument('--prompt_version', type=str, default='v1')
     args = parser.parse_args()
     
@@ -345,7 +345,7 @@ def main():
         print(f"{k:<20} : {v}")
     
     os.makedirs(f'{RESULTS_DIR}/toxic_chat_results', exist_ok=True)
-    out_name = f'{RESULTS_DIR}/toxic_chat_results/{args.judge_type}_{args.judge_model}_prompt_{args.prompt_version}_metrics.pkl'
+    out_name = f'{RESULTS_DIR}/toxic_chat_results/toxic_chat-{args.judge_type}-{args.judge_model}-prompt_{args.prompt_version}-metrics.pkl'
     with open(out_name, 'wb') as f:
         pickle.dump(metrics, f)
 
