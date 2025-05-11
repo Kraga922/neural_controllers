@@ -128,7 +128,7 @@ def split_states_on_idx(inputs, split):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control_method', type=str, default='rfm')
-    parser.add_argument('--model_name', type=str, default='llama_3.3_70b_4bit_it', choices=['llama_3_8b_it', 'llama_3.3_70b_4bit_it'])
+    parser.add_argument('--model_name', type=str, default='llama_3.3_70b_4bit_it')
     parser.add_argument('--k_folds', type=int, default=5)
     parser.add_argument('--n_components', type=int, default=6)
     parser.add_argument('--rfm_iters', type=int, default=10)
@@ -250,7 +250,9 @@ def main():
     from direction_utils import compute_prediction_metrics
     aggregated_metrics = compute_prediction_metrics(aggregated_preds_sorted, labels)
     best_layer_metrics = compute_prediction_metrics(best_layer_preds_sorted, labels)
-
+    
+    # out_name = f'{results_dir}/{source_ds}-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-best_layer_metrics.pkl'
+    # out_name = f'{results_dir}/{source_ds}-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-aggregated_metrics.pkl'
     agg_metrics_file = f'{results_dir}/halu_eval_wild-{model_name}-{control_method}-prompt_{prompt_version}-tuning_metric_{tuning_metric}-top_k_{n_components}-aggregated_metrics.pkl'
     with open(agg_metrics_file, 'wb') as f:
         pickle.dump(aggregated_metrics, f)
