@@ -237,6 +237,21 @@ def main():
         with open(hidden_states_path, 'wb') as f:
             pickle.dump(hidden_states, f)
 
+    train_inputs, train_labels = get_fava_training_data(tokenizer, prompt_version=prompt_version)
+
+    train_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
+                                f'fava_training_{model_name}_prompt_{prompt_version}.pth')
+    if os.path.exists(train_hidden_states_path):
+        with open(train_hidden_states_path, 'rb') as f:
+            train_hidden_states = pickle.load(f)
+    else:
+        from direction_utils import get_hidden_states
+        train_hidden_states = get_hidden_states(train_inputs, language_model, tokenizer, 
+                                    controller.hidden_layers, 
+                                    controller.hyperparams['forward_batch_size'])
+
+        with open(train_hidden_states_path, 'wb') as f:
+            pickle.dump(train_hidden_states, f)
 
     # K-Fold Cross Validation on annotated data for val/test
     all_aggregated_predictions = []
@@ -273,21 +288,7 @@ def main():
                 n_components=n_components
             )
 
-            train_inputs, train_labels = get_fava_training_data(tokenizer, prompt_version=prompt_version)
-
-            train_hidden_states_path = os.path.join(f'{NEURAL_CONTROLLERS_DIR}', f'hidden_states', 
-                                      f'fava_training_{model_name}_prompt_{prompt_version}.pth')
-            if os.path.exists(train_hidden_states_path):
-                with open(train_hidden_states_path, 'rb') as f:
-                    train_hidden_states = pickle.load(f)
-            else:
-                from direction_utils import get_hidden_states
-                train_hidden_states = get_hidden_states(train_inputs, language_model, tokenizer, 
-                                            controller.hidden_layers, 
-                                            controller.hyperparams['forward_batch_size'])
-    
-                with open(train_hidden_states_path, 'wb') as f:
-                    pickle.dump(train_hidden_states, f)
+            
 
             controller.compute_directions(train_hidden_states, train_labels, 
                                           val_hidden_states, val_labels,
@@ -296,18 +297,18 @@ def main():
               
 
         # Split val set into train and sub-val sets
-        train_indices, sub_val_indices = train_test_split(range(len(val_labels)), test_size=0.2, random_state=0, shuffle=True)
-        train_indices = torch.tensor(train_indices)
+        sub_train_indices, sub_val_indices = train_test_split(range(len(val_labels)), test_size=0.2, random_state=0, shuffle=True)
+        sub_train_indices = torch.tensor(sub_train_indices)
         sub_val_indices = torch.tensor(sub_val_indices)
 
-        train_hidden_states = {layer_idx: layer_states[train_indices] for layer_idx, layer_states in val_hidden_states.items()}
+        train_sub_hidden_states = {layer_idx: layer_states[sub_train_indices] for layer_idx, layer_states in val_hidden_states.items()}
         val_sub_hidden_states = {layer_idx: layer_states[sub_val_indices] for layer_idx, layer_states in val_hidden_states.items()}
 
-        train_labels = [val_labels[i] for i in train_indices]
+        train_sub_labels = [val_labels[i] for i in sub_train_indices]
         val_sub_labels = [val_labels[i] for i in sub_val_indices]
         
         _, _, _, test_predictions = controller.evaluate_directions(
-            train_hidden_states, train_labels,
+            train_sub_hidden_states, train_sub_labels,
             val_sub_hidden_states, val_sub_labels,
             test_hidden_states, test_labels,
             n_components=n_components,
