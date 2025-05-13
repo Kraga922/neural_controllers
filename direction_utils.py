@@ -5,18 +5,16 @@ from torch.utils.data import DataLoader, TensorDataset
 import sys
 sys.path.insert(0, '/u/dbeaglehole/xrfm')
 
-from xrfm import xRFM
+from xrfm import xRFM, RFM
 from sklearn.linear_model import LogisticRegression
 
 from sklearn.model_selection import train_test_split
-from torchmetrics.regression import R2Score
 from sklearn.metrics import roc_auc_score
 
 from copy import deepcopy
 from tqdm import tqdm
 
-from utils import preds_to_proba, split_indices
-from calibration import PlattCalibration
+from utils import preds_to_proba
 
 # For scaling linear probe beyond ~50k datapoints.
 def batch_transpose_multiply(A, B, mb_size=5000):
@@ -88,7 +86,9 @@ def f1_score(preds, labels):
     recall = recall_score(preds, labels)
     return 2 * (precision * recall) / (precision + recall + 1e-8)  # add small epsilon to prevent division by zero
 
-def compute_prediction_metrics(preds, labels):
+def compute_prediction_metrics(preds, labels, classification_threshold=0.5):
+    if len(labels.shape) == 1:
+        labels = labels.reshape(-1, 1)
     num_classes = labels.shape[1]
     if isinstance(preds, torch.Tensor):
         preds = preds.cpu().numpy()
@@ -98,8 +98,8 @@ def compute_prediction_metrics(preds, labels):
     auc = roc_auc_score(labels, preds)
     mse = np.mean((preds-labels)**2)
     if num_classes == 1:  # Binary classification
-        preds = np.where(preds >= 0.5, 1, 0)
-        labels = np.where(labels >= 0.5, 1, 0)
+        preds = np.where(preds >= classification_threshold, 1, 0)
+        labels = np.where(labels >= classification_threshold, 1, 0)
         acc = accuracy_fn(preds, labels)
         precision = precision_score(preds, labels)
         recall = recall_score(preds, labels)
@@ -306,7 +306,7 @@ def append_one(X):
     assert(Xb.shape == new_shape)
     return Xb
 
-def linear_solve(X, y, use_bias=True):
+def linear_solve(X, y, use_bias=True, reg=0):
     """
     projected_inputs : (n, d)
     labels : (n, c) or (n, )
@@ -326,10 +326,10 @@ def linear_solve(X, y, use_bias=True):
     if n>d:   
         XtX = inputs.T@inputs
         XtY = inputs.T@y
-        beta = torch.linalg.pinv(XtX)@XtY # (d, c)
+        beta = torch.linalg.pinv(XtX + reg*torch.eye(d).to(inputs.device))@XtY # (d, c)
     else:
         XXt = inputs@inputs.T
-        alpha = torch.linalg.pinv(XXt)@y # (n, c)
+        alpha = torch.linalg.pinv(XXt + reg*torch.eye(n).to(inputs.device))@y # (n, c)
         beta = inputs.T @ alpha
     
     if use_bias:
@@ -342,7 +342,7 @@ def linear_solve(X, y, use_bias=True):
         return beta
         
 
-def logistic_solve(X, y):
+def logistic_solve(X, y, C=1):
     """
     projected_inputs : (n, d)
     labels : (n, c)
@@ -353,7 +353,7 @@ def logistic_solve(X, y):
         y = y.flatten()
     else:
         y = y.argmax(dim=1)
-    model = LogisticRegression(fit_intercept=True, max_iter=1000) # use bias
+    model = LogisticRegression(fit_intercept=True, max_iter=1000, C=C) # use bias
     model.fit(X.cpu(), y.cpu())
     
     beta = torch.from_numpy(model.coef_).to(X.dtype).to(X.device)
@@ -361,48 +361,101 @@ def logistic_solve(X, y):
     
     return beta.T, bias
 
-def aggregate_layers(layer_outputs, val_y, test_y, use_logistic=False, use_rfm=False, tuning_metric='auc'):
+def aggregate_layers(layer_outputs, train_y, val_y, test_y, agg_model='linear', tuning_metric='auc'):
     
     # solve aggregator on validation set
+    train_X = torch.concat(layer_outputs['train'], dim=1) # (n, num_layers*n_components)    
     val_X = torch.concat(layer_outputs['val'], dim=1) # (n, num_layers*n_components)    
-    test_X = torch.concat(layer_outputs['test'], dim=1)
+    test_X = torch.concat(layer_outputs['test'], dim=1) # (n, num_layers*n_components)    
 
-    # split validation set into train and val
-    train_indices, val_indices = split_indices(len(val_y))
-    train_y = val_y[train_indices]
-    val_y = val_y[val_indices]
-    train_X = val_X[train_indices]
-    val_X = val_X[val_indices]
     print("train_X", train_X.shape, "val_X", val_X.shape, "test_X", test_X.shape)
 
-    if use_rfm:
-        rfm_params = {
-            'model': {
-                'kernel': 'l2_high_dim',
-                'bandwidth': 10,
-            },
-            'fit': {
-                'reg': 1e-3,
-                'iters': 10
-            }
-        }
-        model = xRFM(rfm_params, device='cuda', tuning_metric=tuning_metric)
+    maximize_metric = (tuning_metric in ['f1', 'auc', 'acc'])
+
+    if agg_model=='rfm':
+        # bw_search_space = [5, 10, 20]
+        # reg_search_space = [1e-4, 1e-3, 1e-2]
+        # kernel_search_space = ['l2_high_dim']
+        bw_search_space = [10]
+        reg_search_space = [1e-4, 1e-3, 1e-2]
+        kernel_search_space = ['l2_high_dim']
+
+        search_space_size = len(bw_search_space) * len(reg_search_space) * len(kernel_search_space)
+        print("Search space size: {}".format(search_space_size))
+
+        best_rfm_params = None
+        best_rfm_score = float('-inf') if maximize_metric else float('inf')
+        for bw in bw_search_space:
+            for reg in reg_search_space:
+                for kernel in kernel_search_space:
+                    rfm_params = {
+                        'model': {
+                            'kernel': kernel,
+                            'bandwidth': bw,
+                        },
+                        'fit': {
+                            'reg': reg,
+                            'iters': 10,
+                        }
+                    }
+                    model = xRFM(rfm_params, device='cuda', tuning_metric=tuning_metric)
+                    model.fit(train_X, train_y, val_X, val_y)              
+                    val_preds = model.predict(val_X)
+                    metrics = compute_prediction_metrics(val_preds, val_y)
+
+                    if (maximize_metric and metrics[tuning_metric] > best_rfm_score)\
+                        or (not maximize_metric and metrics[tuning_metric] < best_rfm_score):
+
+                        best_rfm_score = metrics[tuning_metric]
+                        best_rfm_params = deepcopy(rfm_params)
+
+        model = xRFM(best_rfm_params, device='cuda', tuning_metric=tuning_metric)
         model.fit(train_X, train_y, val_X, val_y)              
-        agg_preds = model.predict(test_X)
-        metrics = compute_prediction_metrics(agg_preds, test_y)
-        return metrics, None, None
-    elif use_logistic:
-        print("Using logistic aggregation")
-        agg_beta, agg_bias = logistic_solve(val_X, val_y) # (num_layers*n_components, num_classes)
+        test_preds = model.predict(test_X)
+
+        metrics = compute_prediction_metrics(test_preds, test_y)
+        return metrics, None, None, test_preds
+    
+    elif agg_model=='logistic':
+        C_search_space = [1000, 100, 10, 1, 1e-1, 1e-2]
+        best_logistic_params = None
+        best_logistic_score = float('-inf') if maximize_metric else float('inf')
+        for C in C_search_space:
+            agg_beta, agg_bias = logistic_solve(train_X, train_y, C=C) # (num_layers*n_components, num_classes)
+            val_preds = val_X@agg_beta + agg_bias
+            metrics = compute_prediction_metrics(val_preds, val_y)
+            if (maximize_metric and metrics[tuning_metric] > best_logistic_score)\
+                or (not maximize_metric and metrics[tuning_metric] < best_logistic_score):
+
+                best_logistic_score = metrics[tuning_metric]
+                best_logistic_params = (agg_beta, agg_bias)
+
+        agg_beta, agg_bias = best_logistic_params
+
+    elif agg_model=='linear':
+        reg_search_space = [1e-4, 1e-3, 1e-2, 1e-1, 1, 1e1]
+        best_linear_params = None
+        best_linear_score = float('-inf') if maximize_metric else float('inf')
+        for reg in reg_search_space:
+            agg_beta, agg_bias = linear_solve(train_X, train_y, reg=reg)
+            val_preds = val_X@agg_beta + agg_bias
+            metrics = compute_prediction_metrics(val_preds, val_y)
+            if (maximize_metric and metrics[tuning_metric] > best_linear_score)\
+                or (not maximize_metric and metrics[tuning_metric] < best_linear_score):
+                
+                best_linear_score = metrics[tuning_metric]
+                best_linear_params = (agg_beta, agg_bias)
+
+        agg_beta, agg_bias = best_linear_params
+
     else:
-        print("Using linear aggregation")
-        agg_beta, agg_bias = linear_solve(val_X, val_y) # (num_layers*n_components, num_classes)
+        raise ValueError(f"Invalid aggregation model: {agg_model}")
 
     # evaluate aggregated predictor on test set
-    agg_preds = test_X@agg_beta + agg_bias
-    agg_preds = agg_preds.reshape(test_y.shape)
-    metrics = compute_prediction_metrics(agg_preds, test_y)
-    return metrics, agg_beta, agg_bias
+    test_preds = test_X@agg_beta + agg_bias
+    test_preds = test_preds.reshape(test_y.shape)
+    metrics = compute_prediction_metrics(test_preds, test_y)
+    return metrics, agg_beta, agg_bias, test_preds
 
     
 def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y, 
@@ -417,7 +470,7 @@ def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y,
         }
     
     best_model = None
-    maximize_metric = (tuning_metric in ['f1', 'auc', 'acc'])
+    maximize_metric = (tuning_metric in ['f1', 'auc', 'acc', 'top_agop_vectors_ols_auc'])
     best_score = float('-inf') if maximize_metric else float('inf')
     for reg in search_space['regs']:
         for bw in search_space['bws']:
@@ -427,25 +480,40 @@ def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y,
                         'model': {
                             'kernel': 'l2_high_dim',
                             'bandwidth': bw,
+                            'tuning_metric': 'top_agop_vectors_ols_auc',
                         },
                         'fit': {
                             'reg': reg,
                             'iters': hyperparams['rfm_iters'],
-                            'center_grads': center_grads
+                            'center_grads': center_grads,
+                            'early_stop_rfm': True,
+                            'get_agop_best_model': True,
+                            'top_k': hyperparams['n_components']
                         }
                     }
-                    model = xRFM(rfm_params, device='cuda', tuning_metric=tuning_metric)
-                    model.fit(train_X, train_y, val_X, val_y)
+                    model = RFM(**rfm_params['model'], device='cuda')
+                    model.fit((train_X, train_y), 
+                              (val_X, val_y), 
+                              **rfm_params['fit']
+                            )
 
-                    if hyperparams.get('calibrate', False):
-                        model.calibrator = PlattCalibration()
-                        model.calibrator.fit(model.predict_proba(val_X), val_y)
-                        uncalibrated_preds = model.predict_proba(val_X)
-                        pred_proba = model.calibrator.predict(uncalibrated_preds)
+                    if tuning_metric == 'top_agop_vectors_ols_auc':
+                        top_k = hyperparams['n_components']
+                        targets = val_y
+
+                        _, U = torch.lobpcg(model.agop_best_model, k=top_k)
+                        top_eigenvectors = U[:, :top_k]
+                        projections = val_X @ top_eigenvectors
+                        projections = projections.reshape(-1, top_k)
+                        
+                        XtX = projections.T @ projections
+                        Xty = projections.T @ targets
+                        betas = torch.linalg.pinv(XtX) @ Xty
+                        preds = torch.sigmoid(projections @ betas).reshape(targets.shape)
+                        val_score = roc_auc_score(targets.cpu().numpy(), preds.cpu().numpy())
                     else:
                         pred_proba = model.predict_proba(val_X)
-
-                    val_score = compute_prediction_metrics(pred_proba, val_y)[tuning_metric]
+                        val_score = compute_prediction_metrics(pred_proba, val_y)[tuning_metric]
 
                     if maximize_metric and val_score > best_score or not maximize_metric and val_score < best_score:
                         best_score = val_score
@@ -491,7 +559,7 @@ def train_linear_probe_on_concept(train_X, train_y, val_X, val_y, use_bias=False
                 Xval = Xval.to(device)
 
                 XXt = X@X.T
-                alpha = torch.linalg.solve(XXt + reg*torch.eye(X.shape[0]).to(device), train_y)
+                alpha = torch.linalg.lstsq(XXt + reg*torch.eye(X.shape[0]).to(device), train_y).solution
                 beta = X.T@alpha
 
             preds = Xval.to(device) @ beta
@@ -502,6 +570,7 @@ def train_linear_probe_on_concept(train_X, train_y, val_X, val_y, use_bias=False
                 best_score = val_score
                 best_reg = reg
                 best_beta = deepcopy(beta)
+
         except Exception as e:
             import traceback
             print(f'Error fitting linear probe: {traceback.format_exc()}')

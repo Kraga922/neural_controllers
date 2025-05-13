@@ -1,64 +1,169 @@
 import torch
 from sklearn.linear_model import LogisticRegression
+from xrfm import RFM
 
 import direction_utils
-from utils import split_indices
+from utils import split_indices, split_train_states
 
 import time
 from tqdm import tqdm
 
-
-class RFMToolkit():
+class Toolkit:
     def __init__(self):
         pass
+        
+    def preprocess_data(self, train_data, train_labels, val_data, val_labels, test_data, test_labels, 
+                         model, tokenizer, hidden_layers, hyperparams, device='cuda'):
+        """
+        Handles preprocessing of train/val/test data and extracts hidden states.
+        
+        Returns:
+            train_hidden_states: Dictionary mapping layer names to hidden states
+            val_hidden_states: Dictionary mapping layer names to hidden states
+            test_hidden_states: Dictionary mapping layer names to hidden states
+            train_y: Training labels
+            val_y: Validation labels
+            test_y: Test labels
+            test_data_provided: Boolean indicating if test data was provided
+            num_classes: Number of classes in the labels
+        """
+        train_passed_as_hidden_states = isinstance(train_data, dict)
+        val_passed_as_hidden_states = isinstance(val_data, dict)
+        test_passed_as_hidden_states = isinstance(test_data, dict)
 
-    def _compute_directions(self, data, labels, model, tokenizer, hidden_layers, hyperparams,
+        if not isinstance(train_labels, torch.Tensor):
+            train_labels = torch.tensor(train_labels).reshape(-1,1)
+        if val_data is not None and not isinstance(val_labels, torch.Tensor):
+            val_labels = torch.tensor(val_labels).reshape(-1,1)
+
+        if len(train_labels.shape) == 1:
+            train_labels = train_labels.unsqueeze(-1)
+        if val_labels is not None and len(val_labels.shape) == 1:
+            val_labels = val_labels.unsqueeze(-1)
+
+        if val_data is None:
+            # val data not provided, split train data into train and val
+            if train_passed_as_hidden_states:
+                assert -1 in train_data.keys(), "train_data must have a key -1 for the last layer"
+                train_indices, val_indices = split_indices(len(train_data[-1]))
+                train_data, val_data = split_train_states(train_data, train_indices, val_indices)
+                val_passed_as_hidden_states = True
+            else:
+                train_indices, val_indices = split_indices(len(train_data))
+                val_data = [train_data[i] for i in val_indices]
+                train_data = [train_data[i] for i in train_indices]
+                
+            all_y = train_labels.float().to(device)
+            train_y = all_y[train_indices]
+            val_y = all_y[val_indices]
+        else:
+            train_y = train_labels.float().to(device)
+            val_y = val_labels.float().to(device)
+
+        test_data_provided = test_data is not None 
+        num_classes = train_y.shape[1]
+        
+        # Extract hidden states
+        if train_passed_as_hidden_states:
+            print("Assuming train_data is already a dictionary of hidden states")
+            train_hidden_states = train_data
+        else:
+            train_hidden_states = direction_utils.get_hidden_states(train_data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
+
+        if val_passed_as_hidden_states:
+            print("Assuming val_data is already a dictionary of hidden states")
+            val_hidden_states = val_data
+        else:
+            val_hidden_states = direction_utils.get_hidden_states(val_data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
+
+        test_hidden_states = None
+        test_y = None
+        if test_data_provided:
+            if test_passed_as_hidden_states:
+                print("Assuming test_data is already a dictionary of hidden states")
+                test_hidden_states = test_data
+            else:
+                test_hidden_states = direction_utils.get_hidden_states(test_data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
+            test_y = torch.tensor(test_labels).reshape(-1, num_classes).float().to(device)
+        
+        return (train_hidden_states, val_hidden_states, test_hidden_states, 
+                train_y, val_y, test_y, test_data_provided, num_classes)
+    
+    def get_layer_data(self, layer_to_eval, train_hidden_states, val_hidden_states, train_y, val_y, device='cuda'):
+        """
+        Extracts data for a specific layer.
+        
+        Returns:
+            train_X: Training data for the layer
+            val_X: Validation data for the layer
+        """
+
+        train_X = train_hidden_states[layer_to_eval].float().to(device)
+        val_X = val_hidden_states[layer_to_eval].float().to(device)
+            
+        print("train X shape:", train_X.shape, "train y shape:", train_y.shape, 
+              "val X shape:", val_X.shape, "val y shape:", val_y.shape)
+        assert(len(train_X) == len(train_y))
+        assert(len(val_X) == len(val_y))
+        
+        return train_X, val_X
+    
+    def _compute_directions(self, train_data, train_labels, val_data, val_labels, model, tokenizer, hidden_layers, hyperparams,
+                            test_data=None, test_labels=None, device='cuda', **kwargs):
+        """
+        Base implementation to be overridden by subclasses.
+        """
+        raise NotImplementedError("Subclasses must implement _compute_directions")
+
+
+class RFMToolkit(Toolkit):
+    def __init__(self):
+        super().__init__()
+
+    def _compute_directions(self, train_data, train_labels, val_data, val_labels, model, tokenizer, hidden_layers, hyperparams,
                             test_data=None, test_labels=None, device='cuda', **kwargs):
         
         compare_to_linear = kwargs.get('compare_to_linear', False)
         log_spectrum = kwargs.get('log_spectrum', False)
         log_path = kwargs.get('log_path', None)
-                
-        train_indices, val_indices = split_indices(len(data))
-        test_data_provided = test_data is not None 
+        tuning_metric = kwargs.get('tuning_metric', 'auc')
+
+        print("Tuning metric:", tuning_metric)
         
-        all_y = labels.float().to(device)
-        train_y = all_y[train_indices]
-        val_y = all_y[val_indices]
-        num_classes = all_y.shape[1]
-        
+        # Process data and extract hidden states
+        (train_hidden_states, val_hidden_states, test_hidden_states, 
+         train_y, val_y, test_y, test_data_provided, num_classes) = self.preprocess_data(
+            train_data, train_labels, val_data, val_labels, test_data, test_labels, 
+            model, tokenizer, hidden_layers, hyperparams, device
+        )
+
+
         direction_outputs = {
-                                'val' : [],
-                                'test' : []
-                            }
+            'train': [],
+            'val': [],
+            'test': []
+        }
         
-        hidden_states = direction_utils.get_hidden_states(data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
         if test_data_provided:
-            test_hidden_states = direction_utils.get_hidden_states(test_data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
             test_direction_accs = {}
-            test_predictor_accs = {}            
-            test_y = torch.tensor(test_labels).reshape(-1,1).float().to(device)
-        
+            test_predictor_accs = {}
         
         n_components = hyperparams['n_components']
         directions = {}
         detector_coefs = {}
 
         for layer_to_eval in tqdm(hidden_layers):
-            hidden_states_at_layer = hidden_states[layer_to_eval].to(device).float()
-            train_X = hidden_states_at_layer[train_indices] 
-            val_X = hidden_states_at_layer[val_indices]
-                
-            print("train X shape:", train_X.shape, "train y shape:", train_y.shape, 
-                  "val X shape:", val_X.shape, "val y shape:", val_y.shape)
-            assert(len(train_X) == len(train_y))
-            assert(len(val_X) == len(val_y))
+            # Get data for this layer
+            train_X, val_X = self.get_layer_data(layer_to_eval, train_hidden_states, val_hidden_states, train_y, val_y, device)
 
             start_time = time.time()
-            rfm_probe = direction_utils.train_rfm_probe_on_concept(train_X, train_y, val_X, val_y, hyperparams)
+            rfm_probe = direction_utils.train_rfm_probe_on_concept(train_X, train_y, val_X, val_y, hyperparams, tuning_metric=tuning_metric)
             end_time = time.time()
             print(f"Time taken to train rfm probe: {end_time - start_time} seconds")
-            concept_features = rfm_probe.collect_best_agops()[0]
+            if isinstance(rfm_probe, RFM):
+                concept_features = rfm_probe.agop_best_model
+            else:
+                concept_features = rfm_probe.collect_best_agops()[0]
 
             if compare_to_linear:
                 _ = direction_utils.train_linear_probe_on_concept(train_X, train_y, val_X, val_y)
@@ -102,6 +207,7 @@ class RFMToolkit():
                 projected_train = train_X@vec         
                 projected_val = val_X@vec
                 projected_test = test_X@vec
+
                 direction_outputs['train'].append(projected_train.reshape(-1,n_components))
                 direction_outputs['val'].append(projected_val.reshape(-1,n_components))
                 direction_outputs['test'].append(projected_test.reshape(-1,n_components))
@@ -118,7 +224,7 @@ class RFMToolkit():
                 
         signs = {}
         if num_classes == 1: # only if binary do you compute signs
-            signs = self._compute_signs(hidden_states, all_y, directions, n_components)
+            signs = self._compute_signs(train_hidden_states, train_y, directions, n_components)
             for layer_to_eval in tqdm(hidden_layers):
                 for c_idx in range(n_components):
                     directions[layer_to_eval][c_idx] *= signs[layer_to_eval][c_idx]
@@ -145,50 +251,38 @@ class RFMToolkit():
                 signs[layer][c_idx] = sign.item()
 
         return signs
-        
 
-class LinearProbeToolkit():
+
+class LinearProbeToolkit(Toolkit):
     def __init__(self):
-        pass
+        super().__init__()
 
-    def _compute_directions(self, data, labels, model, tokenizer, hidden_layers, hyperparams,
-                            test_data=None, test_labels=None, device='cuda'):
-                
-        train_indices, val_indices = split_indices(len(data))
-        test_data_provided = test_data is not None 
+    def _compute_directions(self, train_data, train_labels, val_data, val_labels, model, tokenizer, hidden_layers, hyperparams,
+                            test_data=None, test_labels=None, device='cuda', **kwargs):
         
-        all_y = labels.float().to(device)
-        train_y = all_y[train_indices]
-        val_y = all_y[val_indices]
-        num_classes = all_y.shape[1]
+        # Process data and extract hidden states
+        (train_hidden_states, val_hidden_states, test_hidden_states, 
+         train_y, val_y, test_y, test_data_provided, num_classes) = self.preprocess_data(
+            train_data, train_labels, val_data, val_labels, test_data, test_labels, 
+            model, tokenizer, hidden_layers, hyperparams, device
+        )
         
         direction_outputs = {
-                                'val' : [],
-                                'test' : []
-                            }
+            'train': [],    
+            'val': [],
+            'test': []
+        }
 
-        hidden_states = direction_utils.get_hidden_states(data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
         if test_data_provided:
-            test_hidden_states = direction_utils.get_hidden_states(test_data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
             test_direction_accs = {}
             test_predictor_accs = {}
-            test_y = torch.tensor(test_labels).reshape(-1, num_classes).float().to(device)
-            
-            print('Sample test hidden states:', test_hidden_states[-1].shape, 'labels:', test_y.shape)
 
-        
         directions = {}
         detector_coefs = {}
 
         for layer_to_eval in tqdm(hidden_layers):
-            hidden_states_at_layer = hidden_states[layer_to_eval].to(device).float()
-            train_X = hidden_states_at_layer[train_indices] 
-            val_X = hidden_states_at_layer[val_indices]
-                
-            print("train X shape:", train_X.shape, "train y shape:", train_y.shape, 
-                  "val X shape:", val_X.shape, "val y shape:", val_y.shape)
-            assert(len(train_X) == len(train_y))
-            assert(len(val_X) == len(val_y))
+            # Get data for this layer
+            train_X, val_X = self.get_layer_data(layer_to_eval, train_hidden_states, val_hidden_states, train_y, val_y, device)
             
             beta, bias = direction_utils.train_linear_probe_on_concept(train_X, train_y, val_X, val_y)
             
@@ -221,6 +315,9 @@ class LinearProbeToolkit():
                 ### Generate direction outputs
                 projected_val = val_X@vec
                 projected_test = test_X@vec
+                if 'train' not in direction_outputs:
+                    direction_outputs['train'] = []
+                direction_outputs['train'].append(projected_train.reshape(-1,num_classes))
                 direction_outputs['val'].append(projected_val.reshape(-1,num_classes))
                 direction_outputs['test'].append(projected_test.reshape(-1,num_classes))
                     
@@ -236,7 +333,7 @@ class LinearProbeToolkit():
         print("Computing signs")
         signs = {}
         if num_classes == 1: # only if binary do you compute signs
-            signs = self._compute_signs(hidden_states, all_y, directions)
+            signs = self._compute_signs(train_hidden_states, train_y, directions)
             for layer_to_eval in tqdm(hidden_layers):
                 directions[layer_to_eval][0] *= signs[layer_to_eval][0] # only one direction, index 0
         
@@ -244,7 +341,7 @@ class LinearProbeToolkit():
         if test_data_provided:
             print("Aggregating predictions over layers using linear stacking")
             direction_agg_acc = direction_utils.aggregate_layers(direction_outputs, train_y, val_y, test_y)
-            test_direction_accs['aggregated'] = direction_agg_acc
+            test_direction_accs['linear_agg'] = direction_agg_acc
 
             return directions, signs, detector_coefs, test_direction_accs
         else: 
@@ -265,53 +362,36 @@ class LinearProbeToolkit():
         return signs
 
     
-class LogisticRegressionToolkit():
+class LogisticRegressionToolkit(Toolkit):
     def __init__(self):
-        pass
+        super().__init__()
 
-    def _compute_directions(self, data, labels, model, tokenizer, hidden_layers, hyperparams,
-                            test_data=None, test_labels=None, device='cuda'):
+    def _compute_directions(self, train_data, train_labels, val_data, val_labels, model, tokenizer, hidden_layers, hyperparams,
+                            test_data=None, test_labels=None, device='cuda', **kwargs):
                 
-      
-        test_data_provided = test_data is not None 
-    
-        train_indices, val_indices = split_indices(len(data))
-        test_data_provided = test_data is not None 
-        
-        all_y = labels.float().to(device)
-        train_y = all_y[train_indices]
-        val_y = all_y[val_indices]
-        num_classes = all_y.shape[1]
+        # Process data and extract hidden states
+        (train_hidden_states, val_hidden_states, test_hidden_states, 
+         train_y, val_y, test_y, test_data_provided, num_classes) = self.preprocess_data(
+            train_data, train_labels, val_data, val_labels, test_data, test_labels, 
+            model, tokenizer, hidden_layers, hyperparams, device
+        )
         
         direction_outputs = {
-                                'val' : [],
-                                'test' : []
-                            }
+            'train': [],
+            'val': [],
+            'test': []
+        }
 
-        hidden_states = direction_utils.get_hidden_states(data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
         if test_data_provided:
-            test_hidden_states = direction_utils.get_hidden_states(test_data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
             test_direction_accs = {}
             test_predictor_accs = {}
-            test_y = torch.tensor(test_labels).reshape(-1,num_classes).float().to(device)
-            
-            print('Sample test hidden states:', test_hidden_states[-1].shape, 'labels:', test_y.shape)
 
-        
         directions = {}
         detector_coefs = {}
-        
-        
 
         for layer_to_eval in tqdm(hidden_layers):
-            hidden_states_at_layer = hidden_states[layer_to_eval].to(device).float()
-            train_X = hidden_states_at_layer[train_indices] 
-            val_X = hidden_states_at_layer[val_indices]
-                
-            print("train X shape:", train_X.shape, "train y shape:", train_y.shape, 
-                  "val X shape:", val_X.shape, "val y shape:", val_y.shape)
-            assert(len(train_X) == len(train_y))
-            assert(len(val_X) == len(val_y))
+            # Get data for this layer
+            train_X, val_X = self.get_layer_data(layer_to_eval, train_hidden_states, val_hidden_states, train_y, val_y, device)
             
             print("Training logistic regression")
             beta, _ = direction_utils.train_logistic_probe_on_concept(train_X, train_y, val_X, val_y, num_classes=num_classes)
@@ -327,7 +407,7 @@ class LogisticRegressionToolkit():
              # solve for slope, intercept on training data
             vec = concept_features.T.to(device=train_X.device)
             projected_train = train_X@vec
-            m, b = direction_utils.linear_solve(projected_train, train_y)
+            m, b = direction_utils.linear_solve(projected_train.to(device=device), train_y.to(device=device))
             detector_coefs[layer_to_eval] = [m, b]
                 
             
@@ -345,6 +425,8 @@ class LogisticRegressionToolkit():
                 ### Generate direction outputs                
                 projected_val = val_X@vec
                 projected_test = test_X@vec
+
+                direction_outputs['train'].append(projected_train.reshape(-1, num_classes))
                 direction_outputs['val'].append(projected_val.reshape(-1, num_classes))
                 direction_outputs['test'].append(projected_test.reshape(-1, num_classes))
                 
@@ -361,7 +443,7 @@ class LogisticRegressionToolkit():
         print("Computing signs")
         signs = {}
         if num_classes == 1: # only if binary do you compute signs
-            signs = self._compute_signs(hidden_states, all_y, directions)
+            signs = self._compute_signs(train_hidden_states, train_y, directions)
             for layer_to_eval in tqdm(hidden_layers):
                 directions[layer_to_eval][0] *= signs[layer_to_eval][0] # only one direction, index 0
             
@@ -390,47 +472,36 @@ class LogisticRegressionToolkit():
         return signs
 
     
-class MeanDifferenceToolkit():
+class MeanDifferenceToolkit(Toolkit):
     def __init__(self):
-        pass
+        super().__init__()
 
-    def _compute_directions(self, data, labels, model, tokenizer, hidden_layers, hyperparams,
+    def _compute_directions(self, train_data, train_labels, val_data, val_labels, model, tokenizer, hidden_layers, hyperparams,
                             test_data=None, test_labels=None, device='cuda'):
                 
-        train_indices, val_indices = split_indices(len(data))
-        test_data_provided = test_data is not None 
+        # Process data and extract hidden states
+        (train_hidden_states, val_hidden_states, test_hidden_states, 
+         train_y, val_y, test_y, test_data_provided, num_classes) = self.preprocess_data(
+            train_data, train_labels, val_data, val_labels, test_data, test_labels, 
+            model, tokenizer, hidden_layers, hyperparams, device
+        )
         
-        all_y = labels.float().to(device)
-        train_y = all_y[train_indices]
-        val_y = all_y[val_indices]
+        assert num_classes == 1, "Mean difference only works for binary classification"
         
-        
-        print("train_y", train_y.shape, "val_y", val_y.shape)
-
-
-        hidden_states = direction_utils.get_hidden_states(data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
-        if test_data_provided:
-            test_hidden_states = direction_utils.get_hidden_states(test_data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
-            test_direction_accs = {}
-            test_y = torch.tensor(test_labels).reshape(-1,1).float().to(device)
-            
-            print('Sample test hidden states:', test_hidden_states[-1].shape, 'labels:', test_y.shape)
-
         direction_outputs = {
-                                'val' : [],
-                                'test' : []
-                            }
-        
+            'train': [],
+            'val': [],
+            'test': []
+        }
+
+        if test_data_provided:
+            test_direction_accs = {}
+
         directions = {}
 
         for layer_to_eval in tqdm(hidden_layers):
-            hidden_states_at_layer = hidden_states[layer_to_eval].to(device).float()
-            train_X = hidden_states_at_layer[train_indices]
-            val_X = hidden_states_at_layer[val_indices]
-            
-            
-            print("train X shape:", train_X.shape, "train y shape:", train_y.shape)
-            assert(len(train_X) == len(train_y))
+            # Get data for this layer
+            train_X, val_X = self.get_layer_data(layer_to_eval, train_hidden_states, val_hidden_states, train_y, val_y, device)
                         
             pos_indices = torch.isclose(train_y, torch.ones_like(train_y)).squeeze(1)
             neg_indices = torch.isclose(train_y, torch.zeros_like(train_y)).squeeze(1)
@@ -464,6 +535,8 @@ class MeanDifferenceToolkit():
                 test_direction_accs[layer_to_eval] = dir_acc
                 
                 projected_val = val_X@mean_dif_vec
+
+                direction_outputs['train'].append(projected_train.reshape(-1,1))
                 direction_outputs['val'].append(projected_val.reshape(-1,1))
                 direction_outputs['test'].append(projected_test.reshape(-1,1))
                 
@@ -472,51 +545,41 @@ class MeanDifferenceToolkit():
             print("Aggregating predictions over layers using linear stacking")
             direction_agg_acc = direction_utils.aggregate_layers(direction_outputs, train_y, val_y, test_y)
             test_direction_accs['linear_agg'] = direction_agg_acc
-            return directions, None, test_direction_accs, None
+            return directions, None, None, test_direction_accs
         else: 
             return directions, None, None, None
 
         
-class PCAToolkit():
+class PCAToolkit(Toolkit):
     def __init__(self):
-        pass
+        super().__init__()
 
-    def _compute_directions(self, data, labels, model, tokenizer, hidden_layers, hyperparams,
+    def _compute_directions(self, train_data, train_labels, val_data, val_labels, model, tokenizer, hidden_layers, hyperparams,
                             test_data=None, test_labels=None, device='cuda'):
                 
-        train_indices, val_indices = split_indices(len(data))
-        test_data_provided = test_data is not None 
-        
-        all_y = labels.float().to(device)
-        train_y = all_y[train_indices]
-        val_y = all_y[val_indices]
-        
-        print("train_y", train_y.shape, "val_y", val_y.shape)
-
-
-        hidden_states = direction_utils.get_hidden_states(data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
-        if test_data_provided:
-            test_hidden_states = direction_utils.get_hidden_states(test_data, model, tokenizer, hidden_layers, hyperparams['forward_batch_size'])
-            test_direction_accs = {}
-            test_y = torch.tensor(test_labels).reshape(-1,1).float().to(device)
+        # Process data and extract hidden states
+        (train_hidden_states, val_hidden_states, test_hidden_states, 
+         train_y, val_y, test_y, test_data_provided, num_classes) = self.preprocess_data(
+            train_data, train_labels, val_data, val_labels, test_data, test_labels, 
+            model, tokenizer, hidden_layers, hyperparams, device
+        )
             
-            print('Sample test hidden states:', test_hidden_states[-1].shape, 'labels:', test_y.shape)
+        assert num_classes == 1, "PCA only works for binary classification"
         
         direction_outputs = {
-                                'val' : [],
-                                'test' : []
-                            }
-        
+            'train': [],
+            'val': [],
+            'test': []
+        }
+
+        if test_data_provided:
+            test_direction_accs = {}
+
         directions = {}
 
         for layer_to_eval in tqdm(hidden_layers):
-            hidden_states_at_layer = hidden_states[layer_to_eval].to(device).float()
-            train_X = hidden_states_at_layer[train_indices]
-            val_X = hidden_states_at_layer[val_indices]
-                
-            print("train X shape:", train_X.shape, "train y shape:", train_y.shape)
-            
-            assert(len(train_X) == len(train_y))
+            # Get data for this layer
+            train_X, val_X = self.get_layer_data(layer_to_eval, train_hidden_states, val_hidden_states, train_y, val_y, device)
             
             print("Training PCA model")
             n_components = hyperparams['n_components']
@@ -546,11 +609,13 @@ class PCAToolkit():
                 test_direction_accs[layer_to_eval] = dir_acc
                 
                 projected_val = val_X@beta
-                direction_outputs['val'].append(projected_val.reshape(-1,1))
-                direction_outputs['test'].append(projected_test.reshape(-1,1))
+                
+                direction_outputs['train'].append(projected_train.reshape(-1,num_classes))
+                direction_outputs['val'].append(projected_val.reshape(-1,num_classes))
+                direction_outputs['test'].append(projected_test.reshape(-1,num_classes))
         
         print("Computing signs")
-        signs = self._compute_signs(hidden_states, all_y, directions)
+        signs = self._compute_signs(train_hidden_states, train_y, directions)
         for layer_to_eval in tqdm(hidden_layers):
             c_idx=0
             directions[layer_to_eval][c_idx] *= signs[layer_to_eval][c_idx]
@@ -573,7 +638,6 @@ class PCAToolkit():
             c_idx = 0
             direction = directions[layer][c_idx]
             hidden_state_projections = direction_utils.project_onto_direction(xs, direction).to(all_y.device)
-            print("hidden_state_projections", hidden_state_projections.shape, "all_y", all_y.shape)
             sign = 2*(direction_utils.pearson_corr(all_y.squeeze(1), hidden_state_projections) > 0) - 1
             signs[layer][c_idx] = sign.item()
 

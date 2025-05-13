@@ -35,6 +35,8 @@ class NeuralController:
         self.control_method = control_method
         self.name = None
 
+        print(f"n_components: {n_components}")
+
         hparams = {
             'control_method' : control_method,
             'rfm_iters' : rfm_iters,
@@ -45,10 +47,7 @@ class NeuralController:
         }
         self.hyperparams = hparams
         
-        if 'concat' in control_method:
-            self.hidden_layers = ['concat']
-        else:
-            self.hidden_layers = list(range(-1, -model.config.num_hidden_layers, -1))
+        self.hidden_layers = list(range(-1, -model.config.num_hidden_layers, -1))
         self.toolkit = TOOLKITS[control_method]()
         self.signs = None
         self.detector_coefs = None
@@ -109,22 +108,20 @@ class NeuralController:
         generation_utils.clear_hooks(hooks)
         return out
 
-    def compute_directions(self, data, labels, hidden_layers=None, **kwargs):
+    def compute_directions(self, train_data, train_labels, val_data=None, val_labels=None, hidden_layers=None, **kwargs):
         if hidden_layers is None:
             hidden_layers = self.hidden_layers
         self.hidden_layers = hidden_layers
-        
-        if not isinstance(labels, torch.Tensor):
-            labels = torch.tensor(labels).reshape(-1,1)
-            
-        self.directions, self.signs, self.detector_coefs, _ = self.toolkit._compute_directions(data, 
-                                                           labels, 
-                                                           self.model, 
-                                                           self.tokenizer, 
-                                                           self.hidden_layers, 
-                                                           self.hyperparams,
-                                                           **kwargs
-                                                          )
+        self.directions, self.signs, self.detector_coefs, _ = self.toolkit._compute_directions(train_data, 
+                                                                train_labels, 
+                                                                val_data,
+                                                                val_labels,
+                                                                self.model, 
+                                                                self.tokenizer, 
+                                                                self.hidden_layers, 
+                                                                self.hyperparams,
+                                                                **kwargs
+                                                            )
         
     def compute_directions_and_accs(self, 
                                     train_data, train_labels, 
@@ -156,64 +153,92 @@ class NeuralController:
         return direction_accs
     
     def evaluate_directions(self,
+                            train_data, train_labels,
                             val_data, val_labels,
                             test_data, test_labels,
                             hidden_layers=None, 
                             n_components=1,
                             agg_positions=False,
-                            use_logistic=False,
-                            use_rfm=False,
-                            unsupervised=False
+                            agg_model='linear',
+                            layer_model='linear',
+                            unsupervised=False,
+                            selection_metric='auc',
                            ):
         
         if hidden_layers is None:
             hidden_layers = self.hidden_layers
         self.hidden_layers = hidden_layers
 
+        if not isinstance(train_labels, torch.Tensor):
+            train_labels = torch.tensor(train_labels).reshape(-1,1)
         if not isinstance(val_labels, torch.Tensor):
             val_labels = torch.tensor(val_labels).reshape(-1,1)
         if not isinstance(test_labels, torch.Tensor):
             test_labels = torch.tensor(test_labels).reshape(-1,1)
         
+        if len(train_labels.shape) == 1:
+            train_labels = train_labels.unsqueeze(-1)
         if len(val_labels.shape) == 1:
-            val_labels = val_labels.reshape(-1,1)
+            val_labels = val_labels.unsqueeze(-1)
         if len(test_labels.shape) == 1:
-            test_labels = test_labels.reshape(-1,1)
+            test_labels = test_labels.unsqueeze(-1)
         
+        train_y = train_labels.to(self.model.device).float()
         val_y = val_labels.to(self.model.device).float()
         test_y = test_labels.to(self.model.device).float()
-        assert(val_y.shape[1]==test_y.shape[1])
+        assert(train_y.shape[1]==val_y.shape[1]==test_y.shape[1])
+
+        if not isinstance(train_data, dict):
+            train_hidden_states = direction_utils.get_hidden_states(train_data, 
+                                                                self.model, 
+                                                                self.tokenizer, 
+                                                                hidden_layers, 
+                                                                self.hyperparams['forward_batch_size'],
+                                                                all_positions=agg_positions
+                                                                )
+        else:
+            train_hidden_states = train_data
+            
+        if not isinstance(val_data, dict):
+            val_hidden_states = direction_utils.get_hidden_states(val_data, 
+                                                                self.model, 
+                                                                self.tokenizer, 
+                                                                hidden_layers, 
+                                                                self.hyperparams['forward_batch_size'],
+                                                                all_positions=agg_positions
+                                                                )
+        else:
+            val_hidden_states = val_data
         
-        val_hidden_states = direction_utils.get_hidden_states(val_data, 
+        if not isinstance(test_data, dict):
+            test_hidden_states = direction_utils.get_hidden_states(test_data, 
                                                               self.model, 
                                                               self.tokenizer, 
                                                               hidden_layers, 
                                                               self.hyperparams['forward_batch_size'],
                                                               all_positions=agg_positions
                                                              )
-        
-        test_hidden_states = direction_utils.get_hidden_states(test_data, 
-                                                              self.model, 
-                                                              self.tokenizer, 
-                                                              hidden_layers, 
-                                                              self.hyperparams['forward_batch_size'],
-                                                              all_positions=agg_positions
-                                                             )
+        else:
+            test_hidden_states = test_data
         
         projections = {
+                        'train' : [],
                         'val' : [],
                         'test' : []
                     }
         val_metrics = {}
         test_metrics = {}
         detector_coefs = {}
-        
+        test_predictions = {}
         for layer_to_eval in tqdm(hidden_layers):
             direction = self.directions[layer_to_eval]
             if isinstance(direction, np.ndarray):
                 direction = torch.from_numpy(direction)
             direction = direction.to(self.model.device).float()[:n_components]
             direction = direction.T
+
+            train_X = train_hidden_states[layer_to_eval].cuda().float()
+            projected_train = train_X@direction
 
             val_X = val_hidden_states[layer_to_eval].cuda().float()
             projected_val = val_X@direction
@@ -225,10 +250,12 @@ class NeuralController:
                 projected_val = torch.mean(projected_val, dim=1) # mean projection
                 projected_test = torch.mean(projected_test, dim=1) # mean projection
     
-            if use_logistic:
+            if layer_model == 'logistic':
                 beta, b = direction_utils.logistic_solve(projected_val, val_y)
-            else:
+            elif layer_model == 'linear':
                 beta, b = direction_utils.linear_solve(projected_val, val_y)
+            else:
+                raise ValueError(f"Invalid layer model: {layer_model}")
             
             detector_coefs[layer_to_eval] = [beta, b]
      
@@ -244,14 +271,7 @@ class NeuralController:
                 projected_test_preds = projected_test@beta + b
 
             assert(projected_test_preds.shape==test_y.shape)
-
-            if self.hyperparams.get('calibrate', False):
-                print("Calibrating predictions")
-                calibrator = PlattCalibration()
-                calibrator.fit(projected_val_preds, val_y)
-
-                projected_val_preds = calibrator.calibrate(projected_val_preds)
-                projected_test_preds = calibrator.calibrate(projected_test_preds)
+            test_predictions[layer_to_eval] = projected_test_preds
             
             val_metrics_on_layer = direction_utils.compute_prediction_metrics(projected_val_preds, val_y)
             val_metrics[layer_to_eval] = val_metrics_on_layer
@@ -259,14 +279,21 @@ class NeuralController:
             test_metrics_on_layer = direction_utils.compute_prediction_metrics(projected_test_preds, test_y)
             test_metrics[layer_to_eval] = test_metrics_on_layer
             
+            projections['train'].append(projected_train.reshape(-1, n_components))
             projections['val'].append(projected_val.reshape(-1, n_components))
             projections['test'].append(projected_test.reshape(-1, n_components))
         
-        agg_metrics, agg_beta, agg_bias = direction_utils.aggregate_layers(projections, val_y, test_y, use_logistic, use_rfm)
+        agg_metrics, agg_beta, agg_bias, agg_predictions = direction_utils.aggregate_layers(projections, train_y, val_y, test_y, agg_model, 
+                                                                                            tuning_metric=selection_metric)
         test_metrics['aggregation'] = agg_metrics
-            
+        test_predictions['aggregation'] = agg_predictions
         detector_coefs['aggregation'] = [agg_beta, agg_bias]
-        return val_metrics, test_metrics, detector_coefs
+
+        best_layer_on_val = max(val_metrics, key=lambda x: val_metrics[x][selection_metric])
+        test_predictions['best_layer'] = test_predictions[best_layer_on_val]
+        test_metrics['best_layer'] = test_metrics[best_layer_on_val]
+        
+        return val_metrics, test_metrics, detector_coefs, test_predictions
     
     
     def detect(self, prompts, rep_layer=-15, use_rep_layer=False, use_avg_projection=False):
