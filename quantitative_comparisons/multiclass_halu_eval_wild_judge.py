@@ -120,45 +120,6 @@ class OpenAIJudge(HallucinationJudge):
                 
         return judgment, class_probs
 
-class AnthropicJudge(HallucinationJudge):
-    def __init__(self, judge_model):
-        super().__init__()
-        self.judge_model = judge_model
-        self.client = Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
-    
-    def get_judgement(self, prompt):
-        response = self.client.messages.create(
-            model=self.judge_model,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=5,
-            temperature=0
-        )
-        
-        # Get the response text
-        judgment = response.content[0].text.strip()
-        
-        # Initialize probabilities for each class
-        class_probs = [0.0] * len(TYPES)
-        
-        # Try to extract a class number from the response
-        try:
-            # Look for a digit between 1-6 in the first few characters
-            for char in judgment[:5]:
-                if char.isdigit() and '1' <= char <= '6':
-                    class_idx = int(char) - 1
-                    # Assign probability 1.0 to the detected class
-                    class_probs = [0.0] * len(TYPES)
-                    class_probs[class_idx] = 1.0
-                    return char, class_probs
-            
-            # Default to first class if no digit found
-            return "1", [1.0 if i == 0 else 0.0 for i in range(len(TYPES))]
-        except:
-            # Default to first class if parsing fails
-            return "1", [1.0 if i == 0 else 0.0 for i in range(len(TYPES))]
-
 class GemmaJudge(HallucinationJudge):
     def __init__(self, judge_model):
         super().__init__()

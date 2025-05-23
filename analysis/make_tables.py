@@ -225,32 +225,38 @@ if rows:
     print("\nLaTeX table (Max RFM results across aggregation methods):")
     print(df_max_rfm_fmt.to_latex(index=True, na_rep='-'))
 
-    # # --- Best Probing Method vs Judge Models Table ---
-    # probe_methods = [m for m in df_pivot.index if m not in JUDGE_METHODS]
-    # df_probe = df_pivot.loc[probe_methods]
-    # best_auc_probe = df_probe.apply(lambda col: col.max(), axis=0)
+    # Calculate averages across datasets for each method
+    print("\nAverage performance across datasets:")
     
-    # df_judges = df_pivot.loc[[m for m in df_pivot.index if m in JUDGE_METHODS]]
+    # For RFM methods, we already have the max between aggregated/best_layer in df_max_rfm
+    rfm_averages = df_max_rfm.mean(axis=1)
     
-    # comparison_df = pd.DataFrame(best_auc_probe).T
-    # comparison_df = pd.concat([comparison_df, df_judges])
-    # comparison_df.index = ['Best Probing Method'] + [m for m in df_pivot.index if m in JUDGE_METHODS]
+    # For other methods (Linear, Logistic), calculate max between aggregated/best_layer
+    other_methods = {}
+    for method in ['Lin. Reg.', 'Logistic']:
+        for model in models:
+            method_rows = [x for x in df_pivot.index if x.startswith(method) and model in x]
+            if len(method_rows) > 0:
+                max_vals = df_pivot.loc[method_rows].max()
+                avg_performance = max_vals.mean()
+                other_methods[f"{method} ({model})"] = avg_performance
+    
+    # For judge models (which don't have aggregated/best_layer variants)
+    judge_averages = {}
+    for judge in JUDGE_METHODS:
+        if judge in LABELS:
+            judge_row = LABELS[judge]
+            if judge_row in df_pivot.index:
+                avg = df_pivot.loc[judge_row].mean()
+                judge_averages[judge_row] = avg
 
-    # def format_best(x, col, df):
-    #     if pd.isna(x):
-    #         return '-'
-    #     if isinstance(x, float):
-    #         val_str = f"{int(x * 1000) / 1000:.3f}"
-    #         if x == df[col].max():
-    #             return f"\\textbf{{{val_str}}}"
-    #         return val_str
-    #     return x
+    # Combine all averages and sort them
+    all_averages = {**dict(zip(rfm_averages.index, rfm_averages)), **other_methods, **judge_averages}
+    sorted_averages = dict(sorted(all_averages.items(), key=lambda x: x[1], reverse=True))
     
-    # comparison_df_fmt = comparison_df.copy()
-    # for col in comparison_df.columns:
-    #     comparison_df_fmt[col] = comparison_df[col].apply(lambda x: format_best(x, col, comparison_df))
+    print("\nAverages across all datasets (sorted by performance):")
+    for method, avg in sorted_averages.items():
+        print(f"{method}: {avg:.3f}")
 
-    # print("\nLaTeX table (Best Probing Method vs Judge Models):")
-    # print(comparison_df_fmt.to_latex(index=True, na_rep='-'))
 else:
     print("No metrics files found.")

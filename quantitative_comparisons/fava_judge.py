@@ -116,65 +116,6 @@ class OpenAIJudge(HallucinationJudge):
             is_yes = 'y' in response.choices[0].message.content.lower()
             return (is_yes, is_yes)
 
-class AnthropicJudge(HallucinationJudge):
-    def __init__(self, judge_model):
-        super().__init__()
-        self.judge_model = judge_model
-        self.client = Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
-    
-    def get_judgement(self, prompt):
-        print("Prompting Anthropic...")
-        response = self.client.messages.create(
-            model=self.judge_model,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=1,
-            temperature=0,
-            logprobs=True,
-            top_logprobs=20
-        )
-        
-        # Extract logprobs from the response
-        logprobs = response.content[0].logprobs[0].tokens[0].top_logprobs
-        yes_prob = None
-        no_prob = None
-        
-        # Find logprobs for Yes/No tokens
-        for token_logprob in logprobs:
-            token = token_logprob.token
-            if token == 'Yes':
-                yes_prob = token_logprob.logprob
-            elif token == 'No':
-                no_prob = token_logprob.logprob
-        
-        # If we didn't find exact "Yes"/"No", look for close matches
-        if yes_prob is None or no_prob is None:
-            for token_logprob in logprobs:
-                token = token_logprob.token
-                if yes_prob is None and ('yes' in token.lower() or 'y' == token.lower()):
-                    yes_prob = token_logprob.logprob
-                elif no_prob is None and ('no' in token.lower() or 'n' == token.lower()):
-                    no_prob = token_logprob.logprob
-        
-        if yes_prob is not None and no_prob is not None:
-            # Convert from log probabilities to probabilities
-            yes_prob_value = torch.exp(torch.tensor(yes_prob)).item()
-            no_prob_value = torch.exp(torch.tensor(no_prob)).item()
-            # Normalize probabilities
-            total = yes_prob_value + no_prob_value
-            yes_prob_norm = yes_prob_value / total if total > 0 else 0.5
-            return (1 if yes_prob > no_prob else 0, yes_prob_norm)
-        elif yes_prob is not None:
-            return (1, 1.0)
-        elif no_prob is not None:
-            return (0, 0.0)
-        else:
-            # Fallback to content
-            content = response.content[0].text
-            is_yes = 'y' in content.lower()
-            return (is_yes, is_yes)
-
 class GemmaJudge(HallucinationJudge):
     def __init__(self, judge_model):
         super().__init__()
