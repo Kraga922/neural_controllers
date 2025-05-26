@@ -2,10 +2,7 @@
 
 A Python library for implementing neural controllers with decoder-only Large Language Models (LLMs), as described in [our paper](https://arxiv.org/abs/2502.03708). Our API allows you to steer the output of language models toward desired concepts and generate lightweight detectors for arbitrary pre-defined concepts. The approach can be implemented with any decoder-only LLM, with demonstrated success on models like instruction-tuned [Llama-3.1-8B](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct), [Llama-3.3-70B](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct), and [Gemma-2-9B](https://huggingface.co/google/gemma-2-9b-it). 
 
-We choose Recursive Feature Machines (RFMs) as our nonlinear predictor at every layer and (often) as our aggregation model. These models are simple, lightweight kernel machines. We also include functionality for our aggregation technology with other baselines including linear/logistic probing and contrastive methods like PCA and difference-in-means. The RFM library can be installed from github (https://github.com/aradha/recursive_feature_machines) using the following command:
-```bash
-pip install git+https://github.com/aradha/recursive_feature_machines.git@pip_install
-```
+We choose Recursive Feature Machines (RFMs) as our nonlinear predictor at every layer and (often) as our aggregation model. These models are simple, lightweight kernel machines. We also include functionality for our aggregation technology with other baselines including linear/logistic probing and contrastive methods like PCA and difference-in-means. The RFM library can be installed from the xRFM github https://github.com/dmbeaglehole/xRFM.
 
 
 See the notebooks folder for examples of steering:
@@ -28,7 +25,7 @@ See the notebooks folder for examples of steering:
 - tqdm
 - torchmetrics
 - scikit-learn
-- RFM (https://github.com/aradha/recursive_feature_machines)
+- xRFM (https://github.com/dmbeaglehole/xRFM)
 - Access to decoder-only LLM weights, such as Llama-3.1-8B-it and Gemma-2-9B-it.
 
 ## Our approach
