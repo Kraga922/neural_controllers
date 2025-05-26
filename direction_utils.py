@@ -480,7 +480,7 @@ def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y,
                         'model': {
                             'kernel': 'l2_high_dim',
                             'bandwidth': bw,
-                            'tuning_metric': 'top_agop_vectors_ols_auc',
+                            'tuning_metric': tuning_metric,
                         },
                         'fit': {
                             'reg': reg,
