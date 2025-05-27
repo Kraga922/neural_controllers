@@ -33,7 +33,7 @@ See the notebooks folder for examples of steering:
 
 ## Our approach
 ![Neural Controller methodology](figures/main_figure.png)
-Methodology for (A) detecting and (B) steering concepts in language models by aggregating layer-wise predictors. (C) Examples of steered generations toward one or multiple concepts. These include harmfulness, Shakespearean/Poetic English, and dishonesty. The produced SSNs in the first box are valid according to online verification services.
+Methodology for (B) steering and (C) detecting concepts in language models by aggregating layer-wise predictors. Examples include harmfulness, Shakespearean/Poetic English, and dishonesty. 
 
 ## Usage
 
