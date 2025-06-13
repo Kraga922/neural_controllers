@@ -125,6 +125,7 @@ train_inputs, train_labels, val_inputs, val_labels, test_inputs, test_labels = g
 controller.compute_directions(train_inputs, train_labels)
 
 val_metrics, test_metrics, _ = controller.evaluate_directions(
+                                    train_inputs, train_labels,
                                     val_inputs, val_labels,
                                     test_inputs, test_labels,
                                 )
@@ -134,12 +135,14 @@ The validation and test metrics are structured as nested dictionaries, with one 
 ```python
 val_metrics = {
     -1: {
+        'auc': float,      # AUROC score
         'acc': float,      # Accuracy score
         'f1 score': float, # F1 score
         'recall': float,   # Recall score
         'precision': float # Precision score
     },
     -2: {
+        'auc': float,
         'acc': float,
         'f1 score': float,
         'recall': float,
@@ -148,7 +151,8 @@ val_metrics = {
     # ... continues through layer -31
     
     'aggregated': {
-        'acc': float,      # Aggregated accuracy across layers
+        'auc': float       # Aggregated auroc across layers
+        'acc': float,      # Aggregated accuracy
         'f1 score': float, # Aggregated F1 score
         'recall': float,   # Aggregated recall
         'precision': float # Aggregated precision
@@ -158,8 +162,8 @@ val_metrics = {
 ## Citation
 If you find this work useful in your research, please consider citing:
 ```bibtex
-@misc{beaglehole2025aggregateconquerdetectingsteering,
-      title={Aggregate and conquer: detecting and steering LLM concepts by combining nonlinear predictors over multiple layers}, 
+@misc{beaglehole2025universalsteeringmonitoringai,
+      title={Toward universal steering and monitoring of AI models}, 
       author={Daniel Beaglehole and Adityanarayanan Radhakrishnan and Enric Boix-Adserà and Mikhail Belkin},
       year={2025},
       eprint={2502.03708},
