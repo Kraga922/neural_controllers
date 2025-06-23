@@ -98,8 +98,10 @@ class Toolkit:
             val_X: Validation data for the layer
         """
 
-        train_X = train_hidden_states[layer_to_eval].float().to(device)
-        val_X = val_hidden_states[layer_to_eval].float().to(device)
+        # train_X = train_hidden_states[layer_to_eval].float().to(device)
+        train_X = train_hidden_states[layer_to_eval].float().cpu()
+        val_X = val_hidden_states[layer_to_eval].float().cpu()
+        # val_X = val_hidden_states[layer_to_eval].float().to(device)
             
         print("train X shape:", train_X.shape, "train y shape:", train_y.shape, 
               "val X shape:", val_X.shape, "val y shape:", val_y.shape)
@@ -148,6 +150,7 @@ class RFMToolkit(Toolkit):
             test_direction_accs = {}
             test_predictor_accs = {}
         
+        hyperparams['n_components'] =10
         n_components = hyperparams['n_components']
         directions = {}
         detector_coefs = {}
@@ -160,10 +163,14 @@ class RFMToolkit(Toolkit):
             rfm_probe = direction_utils.train_rfm_probe_on_concept(train_X, train_y, val_X, val_y, hyperparams, tuning_metric=tuning_metric)
             end_time = time.time()
             print(f"Time taken to train rfm probe: {end_time - start_time} seconds")
+            if rfm_probe is None:
+                raise RuntimeError("All RFM probe training attempts failed. Possible cause: GPU OOM. Try reducing batch size, hidden layer size, or model complexity.")
+
             if isinstance(rfm_probe, RFM):
                 concept_features = rfm_probe.agop_best_model
             else:
                 concept_features = rfm_probe.collect_best_agops()[0]
+
 
             if compare_to_linear:
                 _ = direction_utils.train_linear_probe_on_concept(train_X, train_y, val_X, val_y)

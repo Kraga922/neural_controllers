@@ -458,24 +458,101 @@ def aggregate_layers(layer_outputs, train_y, val_y, test_y, agg_model='linear', 
     return metrics, agg_beta, agg_bias, test_preds
 
     
+# def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y, 
+    #                            hyperparams, search_space=None, 
+    #                            tuning_metric='auc'):
+    
+    # if search_space is None:
+    #     search_space = {
+    #         'regs': [1e-3],
+    #         'bws': [1, 10, 100],
+    #         'center_grads': [True, False]
+    #     }
+    
+    # best_model = None
+    # maximize_metric = (tuning_metric in ['f1', 'auc', 'acc', 'top_agop_vectors_ols_auc'])
+    # best_score = float('-inf') if maximize_metric else float('inf')
+    # for reg in search_space['regs']:
+    #     for bw in search_space['bws']:
+    #         for center_grads in search_space['center_grads']:
+    #             try:
+    #                 rfm_params = {
+    #                     'model': {
+    #                         'kernel': 'l2_high_dim',
+    #                         'bandwidth': bw,
+    #                         'tuning_metric': tuning_metric,
+    #                     },
+    #                     'fit': {
+    #                         'reg': reg,
+    #                         'iters': hyperparams['rfm_iters'],
+    #                         'center_grads': center_grads,
+    #                         'early_stop_rfm': True,
+    #                         'get_agop_best_model': True,
+    #                         'top_k': hyperparams['n_components']
+    #                     }
+    #                 }
+    #                 model = RFM(**rfm_params['model'], device='cuda')
+    #                 model.fit((train_X, train_y), 
+    #                           (val_X, val_y), 
+    #                           **rfm_params['fit']
+    #                         )
+
+    #                 if tuning_metric == 'top_agop_vectors_ols_auc':
+    #                     top_k = hyperparams['n_components']
+    #                     targets = val_y
+
+    #                     _, U = torch.lobpcg(model.agop_best_model, k=top_k)
+    #                     top_eigenvectors = U[:, :top_k]
+    #                     projections = val_X @ top_eigenvectors
+    #                     projections = projections.reshape(-1, top_k)
+                        
+    #                     XtX = projections.T @ projections
+    #                     Xty = projections.T @ targets
+    #                     betas = torch.linalg.pinv(XtX) @ Xty
+    #                     preds = torch.sigmoid(projections @ betas).reshape(targets.shape)
+    #                     val_score = roc_auc_score(targets.cpu().numpy(), preds.cpu().numpy())
+    #                 else:
+    #                     pred_proba = model.predict_proba(val_X)
+    #                     val_score = compute_prediction_metrics(pred_proba, val_y)[tuning_metric]
+
+    #                 if maximize_metric and val_score > best_score or not maximize_metric and val_score < best_score:
+    #                     best_score = val_score
+    #                     best_reg = reg
+    #                     best_model = deepcopy(model)
+    #                     best_bw = bw    
+    #                     best_center_grads = center_grads
+    #             except Exception as e:
+    #                 import traceback
+    #                 print(f'Error fitting RFM: {traceback.format_exc()}')
+    #                 continue
+            
+    # print(f'Best RFM {tuning_metric}: {best_score}, reg: {best_reg}, bw: {best_bw}, center_grads: {best_center_grads}')
+
+    # return best_model
+
 def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y, 
                                hyperparams, search_space=None, 
                                tuning_metric='auc'):
-    
+    import traceback
+
     if search_space is None:
         search_space = {
             'regs': [1e-3],
             'bws': [1, 10, 100],
             'center_grads': [True, False]
         }
-    
+
     best_model = None
-    maximize_metric = (tuning_metric in ['f1', 'auc', 'acc', 'top_agop_vectors_ols_auc'])
-    best_score = float('-inf') if maximize_metric else float('inf')
+    best_score = float('-inf') if tuning_metric in ['f1', 'auc', 'acc', 'top_agop_vectors_ols_auc'] else float('inf')
+    maximize_metric = tuning_metric in ['f1', 'auc', 'acc', 'top_agop_vectors_ols_auc']
+    
     for reg in search_space['regs']:
         for bw in search_space['bws']:
             for center_grads in search_space['center_grads']:
                 try:
+                    # Clear GPU cache before each attempt
+                    torch.cuda.empty_cache()
+                    
                     rfm_params = {
                         'model': {
                             'kernel': 'l2_high_dim',
@@ -484,28 +561,37 @@ def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y,
                         },
                         'fit': {
                             'reg': reg,
-                            'iters': hyperparams['rfm_iters'],
+                            'iters': min(hyperparams['rfm_iters'], 50),  # Reduce iterations
                             'center_grads': center_grads,
                             'early_stop_rfm': True,
                             'get_agop_best_model': True,
-                            'top_k': hyperparams['n_components']
+                            'top_k': min(hyperparams['n_components'], 32)  # Reduce components
                         }
                     }
-                    model = RFM(**rfm_params['model'], device='cuda')
-                    model.fit((train_X, train_y), 
-                              (val_X, val_y), 
-                              **rfm_params['fit']
-                            )
+
+                    # Try CUDA first, then CPU if OOM
+                    try:
+                        model = RFM(**rfm_params['model'], device='cuda')
+                        print(f"Fitting RFM with reg={reg}, bw={bw}, center_grads={center_grads}")
+                        model.fit((train_X, train_y), (val_X, val_y), **rfm_params['fit'])
+                    except RuntimeError as cuda_e:
+                        if "CUDA out of memory" in str(cuda_e):
+                            print(f"CUDA OOM, trying CPU for reg={reg}, bw={bw}, center_grads={center_grads}")
+                            torch.cuda.empty_cache()
+                            model = RFM(**rfm_params['model'], device='cpu')
+                            model.fit((train_X.cpu(), train_y.cpu()), (val_X.cpu(), val_y.cpu()), **rfm_params['fit'])
+                        else:
+                            raise cuda_e
 
                     if tuning_metric == 'top_agop_vectors_ols_auc':
-                        top_k = hyperparams['n_components']
+                        top_k = min(hyperparams['n_components'], 32)
                         targets = val_y
 
                         _, U = torch.lobpcg(model.agop_best_model, k=top_k)
                         top_eigenvectors = U[:, :top_k]
                         projections = val_X @ top_eigenvectors
                         projections = projections.reshape(-1, top_k)
-                        
+
                         XtX = projections.T @ projections
                         Xty = projections.T @ targets
                         betas = torch.linalg.pinv(XtX) @ Xty
@@ -515,20 +601,31 @@ def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y,
                         pred_proba = model.predict_proba(val_X)
                         val_score = compute_prediction_metrics(pred_proba, val_y)[tuning_metric]
 
-                    if maximize_metric and val_score > best_score or not maximize_metric and val_score < best_score:
+                    if (maximize_metric and val_score > best_score) or (not maximize_metric and val_score < best_score):
                         best_score = val_score
-                        best_reg = reg
                         best_model = deepcopy(model)
-                        best_bw = bw    
+                        best_reg = reg
+                        best_bw = bw
                         best_center_grads = center_grads
-                except Exception as e:
-                    import traceback
-                    print(f'Error fitting RFM: {traceback.format_exc()}')
-                    continue
-            
-    print(f'Best RFM {tuning_metric}: {best_score}, reg: {best_reg}, bw: {best_bw}, center_grads: {best_center_grads}')
 
+                except RuntimeError as e:
+                    if "CUDA out of memory" in str(e) or "out of memory" in str(e):
+                        print(f"OOM error with reg={reg}, bw={bw}, center_grads={center_grads}, skipping...")
+                        torch.cuda.empty_cache()
+                    else:
+                        print(f"Error fitting RFM: {traceback.format_exc()}")
+                    continue
+                except Exception as e:
+                    print(f"Error fitting RFM: {traceback.format_exc()}")
+                    continue
+
+    if best_model is None:
+        print("RFM fitting failed for all hyperparameter combinations.")
+        return None
+
+    print(f"Best RFM {tuning_metric}: {best_score}, reg: {best_reg}, bw: {best_bw}, center_grads: {best_center_grads}")
     return best_model
+
 
 def train_linear_probe_on_concept(train_X, train_y, val_X, val_y, use_bias=False, tuning_metric='auc', device='cuda'):
 
