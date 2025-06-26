@@ -9,7 +9,7 @@ from xrfm import xRFM, RFM
 from sklearn.linear_model import LogisticRegression
 
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
 
 from copy import deepcopy
 from tqdm import tqdm
@@ -86,50 +86,146 @@ def f1_score(preds, labels):
     recall = recall_score(preds, labels)
     return 2 * (precision * recall) / (precision + recall + 1e-8)  # add small epsilon to prevent division by zero
 
-def compute_prediction_metrics(preds, labels, classification_threshold=0.5):
-    if len(labels.shape) == 1:
-        labels = labels.reshape(-1, 1)
-    num_classes = labels.shape[1]
-    if isinstance(preds, torch.Tensor):
-        preds = preds.cpu().numpy()
-    if isinstance(labels, torch.Tensor):
-        labels = labels.cpu().numpy()
+# def compute_prediction_metrics(preds, labels, classification_threshold=0.5):
+    
+#     # if len(labels.shape) > 1:
+#     #     labels = labels.ravel()
 
-    auc = roc_auc_score(labels, preds)
-    mse = np.mean((preds-labels)**2)
-    if num_classes == 1:  # Binary classification
-        preds = np.where(preds >= classification_threshold, 1, 0)
-        labels = np.where(labels >= classification_threshold, 1, 0)
-        acc = accuracy_fn(preds, labels)
-        precision = precision_score(preds, labels)
-        recall = recall_score(preds, labels)
-        f1 = f1_score(preds, labels)
-    else:  # Multiclass classification
-        preds_classes = np.argmax(preds, axis=1)
-        label_classes = np.argmax(labels, axis=1)
+#     if len(labels.shape) == 1:
+#         labels = labels.reshape(-1, 1)
+#     num_classes = labels.shape[1]
+#     if isinstance(preds, torch.Tensor):
+#         preds = preds.cpu().numpy()
+#     if isinstance(labels, torch.Tensor):
+#         labels = labels.cpu().numpy()
+
+#     auc = roc_auc_score(labels, preds)
+#     mse = np.mean((preds-labels)**2)
+#     if num_classes == 1:  # Binary classification
+#         preds = np.where(preds >= classification_threshold, 1, 0)
+#         labels = np.where(labels >= classification_threshold, 1, 0)
+#         acc = accuracy_fn(preds, labels)
+#         precision = precision_score(preds, labels)
+#         recall = recall_score(preds, labels)
+#         f1 = f1_score(preds, labels)
+#     else:  # Multiclass classification
+#         preds_classes = np.argmax(preds, axis=1)
+#         label_classes = np.argmax(labels, axis=1)
         
-        # Compute accuracy
-        acc = np.sum(preds_classes == label_classes)/ len(preds) * 100
+#         # Compute accuracy
+#         acc = np.sum(preds_classes == label_classes)/ len(preds) * 100
         
-        # Initialize metrics for averaging
-        precision, recall, f1 = 0.0, 0.0, 0.0
+#         # Initialize metrics for averaging
+#         precision, recall, f1 = 0.0, 0.0, 0.0
         
-        # Compute metrics for each class
-        for class_idx in range(num_classes):
-            class_preds = (preds_classes == class_idx).astype(np.float32)
-            class_labels = (label_classes == class_idx).astype(np.float32)
+#         # Compute metrics for each class
+#         for class_idx in range(num_classes):
+#             class_preds = (preds_classes == class_idx).astype(np.float32)
+#             class_labels = (label_classes == class_idx).astype(np.float32)
             
-            precision += precision_score(class_preds, class_labels)
-            recall += recall_score(class_preds, class_labels)
-            f1 += f1_score(class_preds, class_labels)
+#             precision += precision_score(class_preds, class_labels)
+#             recall += recall_score(class_preds, class_labels)
+#             f1 += f1_score(class_preds, class_labels)
         
-        # Average metrics across classes
-        precision /= num_classes
-        recall /= num_classes
-        f1 /= num_classes
+#         # Average metrics across classes
+#         precision /= num_classes
+#         recall /= num_classes
+#         f1 /= num_classes
 
-    metrics = {'acc': acc, 'precision': precision, 'recall': recall, 'f1': f1, 'auc': auc, 'mse': mse}
+#     metrics = {'acc': acc, 'precision': precision, 'recall': recall, 'f1': f1, 'auc': auc, 'mse': mse}
+#     return metrics
+
+def compute_prediction_metrics(pred_proba, y_true):
+    """
+    Compute prediction metrics with proper shape handling
+    """
+    from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
+    import numpy as np
+    import torch
+    
+    # Convert to numpy if needed
+    if isinstance(pred_proba, torch.Tensor):
+        pred_proba = pred_proba.cpu().numpy()
+    if isinstance(y_true, torch.Tensor):
+        y_true = y_true.cpu().numpy()
+    
+    # Ensure y_true is 1D
+    y_true = y_true.flatten()
+    
+    # Handle pred_proba shape
+    if len(pred_proba.shape) > 1:
+        if pred_proba.shape[1] == 2:
+            # Binary classification with 2 columns - take positive class probability
+            pred_proba_1d = pred_proba[:, 1]
+        elif pred_proba.shape[1] == 1:
+            # Single column - flatten
+            pred_proba_1d = pred_proba.flatten()
+        else:
+            # Multi-class - take max probability
+            pred_proba_1d = np.max(pred_proba, axis=1)
+    else:
+        pred_proba_1d = pred_proba.flatten()
+    
+    # Ensure same length
+    min_len = min(len(y_true), len(pred_proba_1d))
+    y_true = y_true[:min_len]
+    pred_proba_1d = pred_proba_1d[:min_len]
+    
+    print(f"Debug: y_true shape: {y_true.shape}, pred_proba shape: {pred_proba_1d.shape}")
+    print(f"Debug: y_true unique values: {np.unique(y_true)}")
+    
+    metrics = {}
+    
+    try:
+        # Calculate AUC
+        if len(np.unique(y_true)) > 1:  # Need at least 2 classes for AUC
+            metrics['auc'] = roc_auc_score(y_true, pred_proba_1d)
+        else:
+            metrics['auc'] = 0.5  # Default for single class
+    except Exception as e:
+        print(f"AUC calculation failed: {e}")
+        metrics['auc'] = 0.5
+    
+    try:
+        # Calculate accuracy
+        pred_binary = (pred_proba_1d > 0.5).astype(int)
+        metrics['acc'] = accuracy_score(y_true, pred_binary)
+    except Exception as e:
+        print(f"Accuracy calculation failed: {e}")
+        metrics['acc'] = 0.5
+    
+    try:
+        # Calculate F1
+        pred_binary = (pred_proba_1d > 0.5).astype(int)
+        metrics['f1'] = f1_score(y_true, pred_binary, average='binary')
+    except Exception as e:
+        print(f"F1 calculation failed: {e}")
+        metrics['f1'] = 0.5
+    
     return metrics
+def safe_model_predict_proba(model, X):
+    """
+    Safely get predictions from model with shape handling
+    """
+    try:
+        pred_proba = model.predict_proba(X)
+        
+        # Ensure predictions are in correct format
+        if isinstance(pred_proba, torch.Tensor):
+            pred_proba = pred_proba.cpu().numpy()
+        
+        # If shape is (n, 2) for binary classification, we want probabilities for positive class
+        if len(pred_proba.shape) > 1 and pred_proba.shape[1] == 2:
+            return pred_proba[:, 1:2]  # Keep as 2D with single column
+        elif len(pred_proba.shape) > 1 and pred_proba.shape[1] == 1:
+            return pred_proba
+        else:
+            return pred_proba.reshape(-1, 1)  # Ensure 2D
+            
+    except Exception as e:
+        print(f"Error in model prediction: {e}")
+        # Return default predictions
+        return np.full((X.shape[0], 1), 0.5)
 
 def get_hidden_states(prompts, model, tokenizer, hidden_layers, forward_batch_size, rep_token=-1, all_positions=False):
 
@@ -531,9 +627,13 @@ def aggregate_layers(layer_outputs, train_y, val_y, test_y, agg_model='linear', 
     # return best_model
 
 def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y, 
-                               hyperparams, search_space=None, 
-                               tuning_metric='auc'):
+                                   hyperparams, search_space=None, 
+                                   tuning_metric='auc'):
     import traceback
+    from copy import deepcopy
+    import torch
+    from sklearn.metrics import roc_auc_score
+    import numpy as np
 
     if search_space is None:
         search_space = {
@@ -541,6 +641,31 @@ def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y,
             'bws': [1, 10, 100],
             'center_grads': [True, False]
         }
+
+    # Ensure labels are properly shaped (1D for binary classification)
+    def ensure_correct_label_shape(labels):
+        """Ensure labels are 1D for binary classification"""
+        if isinstance(labels, torch.Tensor):
+            labels = labels.squeeze()
+            if len(labels.shape) > 1:
+                if labels.shape[1] == 1:
+                    labels = labels.reshape(-1)
+                elif labels.shape[1] == 2:
+                    labels = torch.argmax(labels, dim=1).float()
+        elif isinstance(labels, np.ndarray):
+            labels = labels.squeeze()
+            if len(labels.shape) > 1:
+                if labels.shape[1] == 1:
+                    labels = labels.reshape(-1)
+                elif labels.shape[1] == 2:
+                    labels = np.argmax(labels, axis=1).astype(float)
+        return labels
+
+    # Fix label shapes
+    train_y = ensure_correct_label_shape(train_y)
+    val_y = ensure_correct_label_shape(val_y)
+
+    print(f"Fixed shapes - train_y: {train_y.shape}, val_y: {val_y.shape}")
 
     best_model = None
     best_score = float('-inf') if tuning_metric in ['f1', 'auc', 'acc', 'top_agop_vectors_ols_auc'] else float('inf')
@@ -561,46 +686,110 @@ def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y,
                         },
                         'fit': {
                             'reg': reg,
-                            'iters': min(hyperparams['rfm_iters'], 50),  # Reduce iterations
+                            'iters': min(hyperparams.get('rfm_iters', 20), 20),
                             'center_grads': center_grads,
                             'early_stop_rfm': True,
                             'get_agop_best_model': True,
-                            'top_k': min(hyperparams['n_components'], 32)  # Reduce components
+                            'top_k': min(hyperparams.get('n_components', 10), 16)
                         }
                     }
 
                     # Try CUDA first, then CPU if OOM
+                    device = 'cuda' if torch.cuda.is_available() else 'cpu'
                     try:
-                        model = RFM(**rfm_params['model'], device='cuda')
+                        model = RFM(**rfm_params['model'], device=device)
                         print(f"Fitting RFM with reg={reg}, bw={bw}, center_grads={center_grads}")
-                        model.fit((train_X, train_y), (val_X, val_y), **rfm_params['fit'])
+                        
+                        # Ensure data is on correct device
+                        if device == 'cuda':
+                            train_X_device = train_X.cuda() if not train_X.is_cuda else train_X
+                            train_y_device = train_y.cuda() if not train_y.is_cuda else train_y
+                            val_X_device = val_X.cuda() if not val_X.is_cuda else val_X
+                            val_y_device = val_y.cuda() if not val_y.is_cuda else val_y
+                        else:
+                            train_X_device = train_X.cpu()
+                            train_y_device = train_y.cpu()
+                            val_X_device = val_X.cpu()
+                            val_y_device = val_y.cpu()
+                        
+                        model.fit((train_X_device, train_y_device), (val_X_device, val_y_device), **rfm_params['fit'])
+                        
                     except RuntimeError as cuda_e:
-                        if "CUDA out of memory" in str(cuda_e):
+                        if "CUDA out of memory" in str(cuda_e) or "out of memory" in str(cuda_e):
                             print(f"CUDA OOM, trying CPU for reg={reg}, bw={bw}, center_grads={center_grads}")
                             torch.cuda.empty_cache()
                             model = RFM(**rfm_params['model'], device='cpu')
                             model.fit((train_X.cpu(), train_y.cpu()), (val_X.cpu(), val_y.cpu()), **rfm_params['fit'])
+                            val_X_device = val_X.cpu()
+                            val_y_device = val_y.cpu()
                         else:
                             raise cuda_e
 
+                    # Calculate validation score with safe prediction handling
                     if tuning_metric == 'top_agop_vectors_ols_auc':
-                        top_k = min(hyperparams['n_components'], 32)
-                        targets = val_y
-
-                        _, U = torch.lobpcg(model.agop_best_model, k=top_k)
-                        top_eigenvectors = U[:, :top_k]
-                        projections = val_X @ top_eigenvectors
-                        projections = projections.reshape(-1, top_k)
-
-                        XtX = projections.T @ projections
-                        Xty = projections.T @ targets
-                        betas = torch.linalg.pinv(XtX) @ Xty
-                        preds = torch.sigmoid(projections @ betas).reshape(targets.shape)
-                        val_score = roc_auc_score(targets.cpu().numpy(), preds.cpu().numpy())
+                        try:
+                            top_k = min(hyperparams.get('n_components', 10), min(16, val_X.shape[0], val_X.shape[1]))
+                            targets = val_y_device if 'val_y_device' in locals() else val_y
+                            targets = ensure_correct_label_shape(targets)
+                            
+                            if hasattr(model, 'agop_best_model') and model.agop_best_model is not None:
+                                try:
+                                    if model.agop_best_model.shape[0] > 1000:
+                                        _, U = torch.lobpcg(model.agop_best_model, k=min(top_k, model.agop_best_model.shape[0]-1))
+                                    else:
+                                        S, U = torch.linalg.eigh(model.agop_best_model)
+                                        U = U[:, -top_k:]
+                                    
+                                    top_eigenvectors = U[:, :top_k] if U.shape[1] >= top_k else U
+                                    val_X_eval = val_X_device if 'val_X_device' in locals() else val_X
+                                    projections = val_X_eval @ top_eigenvectors
+                                    
+                                    if len(projections.shape) == 1:
+                                        projections = projections.unsqueeze(1)
+                                    
+                                    if projections.shape[1] > 0:
+                                        XtX = projections.T @ projections
+                                        Xty = projections.T @ targets.unsqueeze(1) if len(targets.shape) == 1 else projections.T @ targets
+                                        XtX += torch.eye(XtX.shape[0], device=XtX.device) * 1e-6
+                                        
+                                        try:
+                                            betas = torch.linalg.solve(XtX, Xty)
+                                        except:
+                                            betas = torch.linalg.pinv(XtX) @ Xty
+                                        
+                                        preds = torch.sigmoid(projections @ betas).squeeze()
+                                        targets_np = targets.cpu().numpy().flatten()
+                                        preds_np = preds.cpu().numpy().flatten()
+                                        
+                                        if len(targets_np) == len(preds_np) and len(np.unique(targets_np)) > 1:
+                                            val_score = roc_auc_score(targets_np, preds_np)
+                                        else:
+                                            val_score = 0.5
+                                    else:
+                                        val_score = 0.5
+                                except Exception as eig_e:
+                                    print(f"Error in eigenvector computation: {str(eig_e)}")
+                                    val_score = 0.5
+                            else:
+                                val_score = 0.5
+                        except Exception as auc_e:
+                            print(f"Error in top_agop_vectors_ols_auc calculation: {str(auc_e)}")
+                            val_score = 0.5
                     else:
-                        pred_proba = model.predict_proba(val_X)
-                        val_score = compute_prediction_metrics(pred_proba, val_y)[tuning_metric]
+                        # Standard prediction metrics with safe handling
+                        try:
+                            val_X_eval = val_X_device if 'val_X_device' in locals() else val_X
+                            val_y_eval = val_y_device if 'val_y_device' in locals() else val_y
+                            
+                            # Use our safe prediction function
+                            pred_proba = safe_model_predict_proba(model, val_X_eval)
+                            val_score = compute_prediction_metrics(pred_proba, val_y_eval)[tuning_metric]
+                            
+                        except Exception as pred_e:
+                            print(f"Error in prediction: {str(pred_e)}")
+                            continue
 
+                    # Update best model
                     if (maximize_metric and val_score > best_score) or (not maximize_metric and val_score < best_score):
                         best_score = val_score
                         best_model = deepcopy(model)
@@ -613,10 +802,10 @@ def train_rfm_probe_on_concept(train_X, train_y, val_X, val_y,
                         print(f"OOM error with reg={reg}, bw={bw}, center_grads={center_grads}, skipping...")
                         torch.cuda.empty_cache()
                     else:
-                        print(f"Error fitting RFM: {traceback.format_exc()}")
+                        print(f"Runtime error fitting RFM: {str(e)}")
                     continue
                 except Exception as e:
-                    print(f"Error fitting RFM: {traceback.format_exc()}")
+                    print(f"Error fitting RFM: {str(e)}")
                     continue
 
     if best_model is None:

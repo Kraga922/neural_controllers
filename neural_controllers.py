@@ -237,15 +237,23 @@ class NeuralController:
             direction = direction.to(self.model.device).float()[:n_components]
             direction = direction.T
 
-            train_X = train_hidden_states[layer_to_eval].cuda().float()
+            # train_X = train_hidden_states[layer_to_eval].cuda().float()
+            # projected_train = train_X@direction
+
+            # val_X = val_hidden_states[layer_to_eval].cuda().float()
+            # projected_val = val_X@direction
+            
+            # test_X = test_hidden_states[layer_to_eval].cuda().float()
+            # projected_test = test_X@direction
+            train_X = train_hidden_states[layer_to_eval].to(self.model.device).float()
             projected_train = train_X@direction
 
-            val_X = val_hidden_states[layer_to_eval].cuda().float()
+            val_X = val_hidden_states[layer_to_eval].to(self.model.device).float()
             projected_val = val_X@direction
-            
-            test_X = test_hidden_states[layer_to_eval].cuda().float()
+
+            test_X = test_hidden_states[layer_to_eval].to(self.model.device).float()
             projected_test = test_X@direction
-            
+
             if agg_positions:
                 projected_val = torch.mean(projected_val, dim=1) # mean projection
                 projected_test = torch.mean(projected_test, dim=1) # mean projection
@@ -352,13 +360,22 @@ class NeuralController:
         composite_directions = {}
         
         for layer_to_eval in tqdm(hidden_layers):
+            # direction = self.directions[layer_to_eval]
+            # if isinstance(direction, np.ndarray):
+            #     direction = torch.from_numpy(direction)
+            # direction = direction.to(self.model.device).float()[:n_components]
+            # direction = direction.T
+
             direction = self.directions[layer_to_eval]
             if isinstance(direction, np.ndarray):
                 direction = torch.from_numpy(direction)
             direction = direction.to(self.model.device).float()[:n_components]
             direction = direction.T
+            # Ensure direction is on the same device as model
+            direction = direction.to(self.model.device)
             
-            val_X = val_hidden_states[layer_to_eval].cuda().float()
+            # val_X = val_hidden_states[layer_to_eval].cuda().float()
+            val_X = val_hidden_states[layer_to_eval].to(self.model.device).float()
             projected_val = val_X@direction
             
             beta = direction_utils.linear_solve(projected_val, val_y, use_bias=False)

@@ -98,10 +98,10 @@ class Toolkit:
             val_X: Validation data for the layer
         """
 
-        # train_X = train_hidden_states[layer_to_eval].float().to(device)
-        train_X = train_hidden_states[layer_to_eval].float().cpu()
-        val_X = val_hidden_states[layer_to_eval].float().cpu()
-        # val_X = val_hidden_states[layer_to_eval].float().to(device)
+        train_X = train_hidden_states[layer_to_eval].float().to(device)
+        # train_X = train_hidden_states[layer_to_eval].float().cpu()
+        # val_X = val_hidden_states[layer_to_eval].float().cpu()
+        val_X = val_hidden_states[layer_to_eval].float().to(device)
             
         print("train X shape:", train_X.shape, "train y shape:", train_y.shape, 
               "val X shape:", val_X.shape, "val y shape:", val_y.shape)
