@@ -244,7 +244,144 @@ class RFMToolkit(Toolkit):
             return directions, signs, detector_coefs, test_direction_accs
         else: 
             return directions, signs, detector_coefs, None
+    
+    ### Testing to see best layers
+    # def _compute_directions(self, train_data, train_labels, val_data, val_labels, model, tokenizer, hidden_layers, hyperparams,
+    #                    test_data=None, test_labels=None, device='cuda', **kwargs):
+        
+    #     compare_to_linear = kwargs.get('compare_to_linear', False)
+    #     log_spectrum = kwargs.get('log_spectrum', False)
+    #     log_path = kwargs.get('log_path', None)
+    #     tuning_metric = kwargs.get('tuning_metric', 'auc')
 
+    #     print("Tuning metric:", tuning_metric)
+        
+    #     # Process data and extract hidden states
+    #     (train_hidden_states, val_hidden_states, test_hidden_states, 
+    #     train_y, val_y, test_y, test_data_provided, num_classes) = self.preprocess_data(
+    #         train_data, train_labels, val_data, val_labels, test_data, test_labels, 
+    #         model, tokenizer, hidden_layers, hyperparams, device
+    #     )
+
+    #     direction_outputs = {
+    #         'train': [],
+    #         'val': [],
+    #         'test': []
+    #     }
+        
+    #     if test_data_provided:
+    #         test_direction_accs = {}
+    #         test_predictor_accs = {}
+        
+    #     hyperparams['n_components'] = 10
+    #     n_components = hyperparams['n_components']
+    #     directions = {}
+    #     detector_coefs = {}
+    #     auc_scores = {}  # Dictionary to store AUC scores per layer
+
+    #     for layer_to_eval in tqdm(hidden_layers):
+    #         # Get data for this layer
+    #         train_X, val_X = self.get_layer_data(layer_to_eval, train_hidden_states, val_hidden_states, train_y, val_y, device)
+
+    #         start_time = time.time()
+    #         result = direction_utils.train_rfm_probe_on_concept(train_X, train_y, val_X, val_y, hyperparams, tuning_metric=tuning_metric)
+    #         if isinstance(result, tuple):
+    #             rfm_probe, auc = result  # Assume function returns (probe, auc)
+    #         else:
+    #             rfm_probe = result
+    #             auc = None  # Fallback if AUC is not returned
+    #         end_time = time.time()
+    #         print(f"Time taken to train rfm probe: {end_time - start_time} seconds")
+    #         if rfm_probe is None:
+    #             raise RuntimeError("All RFM probe training attempts failed. Possible cause: GPU OOM. Try reducing batch size, hidden layer size, or model complexity.")
+
+    #         # Store AUC score
+    #         if auc is not None:
+    #             auc_scores[layer_to_eval] = auc
+    #             print(f"Layer {layer_to_eval}: AUC = {auc}")
+    #         else:
+    #             print(f"Layer {layer_to_eval}: AUC not found")
+    #             # Debug rfm_probe attributes
+    #             print(f"rfm_probe attributes: {dir(rfm_probe)}")
+
+    #         if isinstance(rfm_probe, RFM):
+    #             concept_features = rfm_probe.agop_best_model
+    #         else:
+    #             concept_features = rfm_probe.collect_best_agops()[0]
+
+    #         if compare_to_linear:
+    #             _ = direction_utils.train_linear_probe_on_concept(train_X, train_y, val_X, val_y)
+
+    #         start_time = time.time()
+    #         S, U = torch.lobpcg(concept_features, k=n_components)
+    #         end_time = time.time()
+    #         print(f"Time taken to compute eigenvectors: {end_time - start_time} seconds")
+
+    #         if log_spectrum:
+    #             spectrum_filename = log_path + f'_layer_{layer_to_eval}.pt'
+    #             print("spectrum_filename", spectrum_filename)
+    #             torch.save(S.cpu(), spectrum_filename)
+
+    #         components = U.T
+    #         directions[layer_to_eval] = components
+            
+    #         ### Generate direction accuracy
+    #         vec = directions[layer_to_eval].T
+    #         projected_train = train_X@vec
+    #         beta, b = direction_utils.linear_solve(projected_train, train_y)
+                
+    #         detector_coefs[layer_to_eval] = [beta, b]
+            
+    #         if test_data_provided:
+    #             test_X = test_hidden_states[layer_to_eval].to(device).float()
+                
+    #             ### Generate predictor outputs
+    #             test_preds = rfm_probe.predict(test_X)
+                
+    #             ### Generate predictor accuracy
+    #             pred_acc = direction_utils.accuracy_fn(test_preds, test_y)
+    #             test_predictor_accs[layer_to_eval] = pred_acc
+                
+    #             ### Generate direction outputs    
+    #             projected_train = train_X@vec         
+    #             projected_val = val_X@vec
+    #             projected_test = test_X@vec
+
+    #             direction_outputs['train'].append(projected_train.reshape(-1, n_components))
+    #             direction_outputs['val'].append(projected_val.reshape(-1, n_components))
+    #             direction_outputs['test'].append(projected_test.reshape(-1, n_components))
+                
+    #             # Evaluate slope, intercept on test data
+    #             projected_preds = projected_test@beta + b
+    #             projected_preds = projected_preds.reshape(-1, num_classes)
+                
+    #             assert(projected_preds.shape == test_y.shape)
+                
+    #             dir_acc = direction_utils.accuracy_fn(projected_preds, test_y)
+    #             test_direction_accs[layer_to_eval] = dir_acc
+
+    #     # Print top 5 layers with highest AUC scores
+    #     if auc_scores:
+    #         sorted_auc = sorted(auc_scores.items(), key=lambda x: x[1], reverse=True)
+    #         print("\nTop 5 layers with highest AUC scores:")
+    #         for layer_idx, auc in sorted_auc[:5]:
+    #             print(f"Layer {layer_idx}: AUC = {auc}")
+
+    #     signs = {}
+    #     if num_classes == 1:  # Only if binary do you compute signs
+    #         signs = self._compute_signs(train_hidden_states, train_y, directions, n_components)
+    #         for layer_to_eval in tqdm(hidden_layers):
+    #             for c_idx in range(n_components):
+    #                 directions[layer_to_eval][c_idx] *= signs[layer_to_eval][c_idx]
+            
+    #     if test_data_provided:
+    #         direction_agg_acc = direction_utils.aggregate_layers(direction_outputs, train_y, val_y, test_y)
+    #         test_direction_accs['aggregated'] = direction_agg_acc
+            
+    #         return directions, signs, detector_coefs, test_direction_accs, auc_scores
+    #     else: 
+    #         return directions, signs, detector_coefs, None, auc_scores
+        
     def _compute_signs(self, hidden_states, all_y, directions, n_components):
         
         signs = {}
