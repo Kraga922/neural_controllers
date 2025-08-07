@@ -511,7 +511,7 @@ class LogisticRegressionToolkit(Toolkit):
         super().__init__()
 
     def _compute_directions(self, train_data, train_labels, val_data, val_labels, model, tokenizer, hidden_layers, hyperparams,
-                            test_data=None, test_labels=None, device='auto', **kwargs): # used to be device='cuda' 
+                            test_data=None, test_labels=None, device='cuda', **kwargs): # used to be device='cuda' 
                 
         # Process data and extract hidden states
         (train_hidden_states, val_hidden_states, test_hidden_states, 
